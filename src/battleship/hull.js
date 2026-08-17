@@ -237,6 +237,30 @@ export function buildDeckSections() {
 }
 
 // deck height at a station, for placing things on it
+// How deep a chip in her goes.
+//
+// A shell hole in a battleship should read the way a chip in a brick reads: a
+// cavity with a floor a hand's breadth in, not a window. What was here before
+// was a ship modelled as a shell with three decks in her, and a hole anywhere
+// in the weather deck looked down through all of them — you could see the levels
+// receding into the dark and the whole thing read as a gaping hole into a
+// building rather than as damage to a piece of armour.
+//
+// So there is one surface behind her plating, this far in, and it is what you
+// see at the bottom of any wound a shell can make. Only something that reaches
+// further than this — a torpedo, a magazine — opens her properly, which is the
+// one time you *should* be looking into her.
+//
+// interior.js draws the backing and colliders.js makes it solid, so this is
+// stated once, here, where deckAt and keelAt already are.
+export const PLATING = 1.15;
+
+// The decks inside her that are not the backing: just the one, deep down, which
+// is only ever seen through a torpedo hole.
+export const INNER_DECKS = [
+  (s) => -keelAt(s) + 1.6, // inner bottom, riding over the keel
+];
+
 export const deckY = (zFrac) => deckAt(zFrac + 0.5);
 export const zOf = (zFrac) => zFrac * SHIP.length;
 

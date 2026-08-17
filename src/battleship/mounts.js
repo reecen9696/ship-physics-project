@@ -5,6 +5,7 @@ import {
 import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
 import { TURRET_SPEC, AA_SPEC, CASEMATES } from './spec.js';
+import { doorHole, bandstandDoorHole, buildTurretInterior } from './turretHouse.js';
 import { STEEL, STEEL_DARK } from './hull.js';
 
 // Every gun mount on the ship is the same machine: a fixed root on the hull, a
@@ -24,7 +25,12 @@ const approach = (cur, target, maxStep) => cur + clamp(target - cur, -maxStep, m
 
 // A gunhouse: side profile extruded across the beam, with a sloped face and a
 // slightly lower rear, so it reads as an armoured box and not a shipping crate.
-function gunhouseGeometry(w, l, h) {
+//
+// `door` punches a hole through the profile. The extrusion runs across the beam,
+// so one hole in the two-dimensional shape comes out as a doorway to port *and*
+// one to starboard, complete with a lined jamb, which is both what a turret has
+// and rather less work than cutting two. See turretHouse.js.
+function gunhouseGeometry(w, l, h, door = false) {
   const p = new Shape();
   p.moveTo(-l / 2, 0);
   p.lineTo(l / 2, 0);
@@ -33,9 +39,28 @@ function gunhouseGeometry(w, l, h) {
   p.lineTo(-l / 2 + 1.0, h);
   p.lineTo(-l / 2, h * 0.8);
   p.closePath();
+  if (door) p.holes.push(doorHole(Shape));
   const g = new ExtrudeGeometry(p, { depth: w, bevelEnabled: false });
   g.translate(0, 0, -w / 2);
   g.rotateY(-Math.PI / 2); // profile x -> ship z, extrusion z -> ship x
+  return g;
+}
+
+// The blocky raised deck a superfiring turret stands on, with a passage cut
+// through it at deck level. Same trick as the gunhouse: the profile is in the
+// (z, y) plane and the extrusion runs across the beam, so one hole gives a way
+// in from port and one from starboard.
+function bandstandGeometry(w, l, h, facing) {
+  const p = new Shape();
+  p.moveTo(-l / 2, -h / 2);
+  p.lineTo(l / 2, -h / 2);
+  p.lineTo(l / 2, h / 2);
+  p.lineTo(-l / 2, h / 2);
+  p.closePath();
+  p.holes.push(bandstandDoorHole(Shape, h, facing));
+  const g = new ExtrudeGeometry(p, { depth: w, bevelEnabled: false });
+  g.translate(0, 0, -w / 2);
+  g.rotateY(-Math.PI / 2);
   return g;
 }
 
@@ -175,7 +200,9 @@ function makeMount({ id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevM
 }
 
 // --- main battery twin turret ------------------------------------------------
-export function createMainTurret({ id, materials, arcCenter, arc, barbetteHeight, bandstand = 0 }) {
+export function createMainTurret({
+  id, materials, arcCenter, arc, barbetteHeight, bandstand = 0,
+}) {
   const S = TURRET_SPEC;
   const slot = materials.slotOf(id);
   const damage = materials.handleFor(id);
@@ -188,14 +215,21 @@ export function createMainTurret({ id, materials, arcCenter, arc, barbetteHeight
   // whole rise as one tall drum instead makes the gunhouse look perched on a
   // pole, which is the thing that reads as wrong from any distance.
   const drum = barbetteHeight - bandstand;
+  const facing = Math.abs(arcCenter) > 90 ? -1 : 1;
   if (bandstand > 0) {
     const w = S.barbetteR * 2.5;
-    const stand = new Mesh(mk(new BoxGeometry(w, bandstand, w * 1.15), STEEL), M);
+    // Not a box any more: an extruded profile with a passage cut through it at
+    // deck level, which is the way into this turret. See turretHouse.js — a
+    // superfiring gunhouse is four metres up and a door in its side would open
+    // onto nothing.
+    const stand = new Mesh(mk(bandstandGeometry(w, w * 1.15, bandstand, facing), STEEL), M);
     stand.position.y = bandstand / 2;
     root.add(stand);
-    // a chamfered shoulder so the block does not meet the deck as a hard slab
-    const skirt = new Mesh(mk(new BoxGeometry(w * 1.12, 0.5, w * 1.26), STEEL), M);
-    skirt.position.y = 0.25;
+    // A chamfered shoulder so the block does not meet the deck as a hard slab.
+    // Kept under `PLAYER.stepUp` so it is a threshold to walk over on the way in
+    // at the passage rather than a step to be climbed.
+    const skirt = new Mesh(mk(new BoxGeometry(w * 1.12, 0.3, w * 1.26), STEEL), M);
+    skirt.position.y = 0.15;
     root.add(skirt);
   }
   // barbette: the armoured drum the turret rides on
@@ -208,9 +242,12 @@ export function createMainTurret({ id, materials, arcCenter, arc, barbetteHeight
   root.add(yawPivot);
 
   const houseZ = -1.0; // the gunhouse sits back on the roller path, its face over the barbette edge
-  const house = new Mesh(mk(gunhouseGeometry(S.gunhouseW, S.gunhouseL, S.gunhouseH), STEEL), M);
+  const house = new Mesh(mk(gunhouseGeometry(S.gunhouseW, S.gunhouseL, S.gunhouseH, true), STEEL), M);
   house.position.z = houseZ;
   yawPivot.add(house);
+  // The room behind the door. It rides on the yaw pivot, which is what makes the
+  // turret its own coordinate space rather than a moving part of the ship's.
+  yawPivot.add(buildTurretInterior({ materials, id }));
   // rangefinder hood across the rear of the roof, and the officer's cupola
   const hood = new Mesh(mk(new BoxGeometry(S.gunhouseW * 1.15, 0.9, 1.4), STEEL_DARK, 0.4), M);
   hood.position.set(0, S.gunhouseH + 0.45, -S.gunhouseL / 2 + 1.6);

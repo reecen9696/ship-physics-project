@@ -6,7 +6,7 @@ import {
 } from './spec.js';
 import {
   buildHullSections, buildDeckSections, hullDescriptor, deckY, zOf, halfBeamAt,
-  checkSuperfiringClearance, DECK_COLOR, STEEL, deckAt, sideAt, keelAt,
+  checkSuperfiringClearance, DECK_COLOR, STEEL, deckAt, sideAt, keelAt, PLATING,
 } from './hull.js';
 import { createMainTurret, createAAMount } from './mounts.js';
 import {
@@ -14,15 +14,17 @@ import {
   buildSteering, buildScrews,
 } from './superstructure.js';
 import { buildRailings } from './railings.js';
+import { buildDeckProps } from './deckProps.js';
 import { buildHullScuttles } from './scuttles.js';
 import { createWreck } from './wreck.js';
 import { createDamageModel, STATUS } from './damage.js';
 import { createFireSmoke } from './fx.js';
 import { createHullSpray } from '../boat/hullSpray.js';
-import { createDamageField } from './damageField.js';
+import { createDamageField, VOXEL } from './damageField.js';
 import { buildInterior, buildDeckhouseInteriors, buildFloodWater } from './interior.js';
 import { createColliders } from './colliders.js';
 import { createStructure } from './structure.js';
+import { createFittings } from './fittings.js';
 import { createFlooding } from './flooding.js';
 import { createShards } from './shards.js';
 import { createBurst } from './burst.js';
@@ -33,6 +35,20 @@ import { STRUCTURE, WOUNDS, BUOYANCY } from './spec.js';
 // Replaced each frame by the plane the buoyancy solver fitted to her probes.
 const FLAT_SEA = { height: 0, slopeX: 0, slopeZ: 0, originX: 0, originZ: 0 };
 const DOWN = new Vector3(0, -1, 0);
+
+// How much flatter a tear is than it is wide, measured along the shell's own
+// path. A burst against a surface takes a wide shallow bowl out of *that
+// surface*; it does not bore a sphere through the ship.
+//
+// The number is set against PLATING, the depth her plating reads as and the
+// depth interior.js draws the backing at. A shell's tear has to stop short of
+// that, because the backing is the floor of the chip and a tear that goes
+// through it turns the chip back into a window. At 3.2 an HE shell opens three
+// metres of deck and reaches about one metre in, against a backing at 1.15 — so
+// what you see through the hole is a solid floor a metre down. A torpedo's tear
+// reaches nearly four metres and goes straight through it, which is the one
+// case where you *should* be looking into her.
+const TEAR_FLATTEN = 3.2;
 
 // The ship as an assembly.
 //
@@ -191,6 +207,33 @@ export function createBattleship({ shading, sunShadow }) {
   root.add(railings.object);
   parts.set('railings', { object: railings.object, damage: null });
 
+  // --- what is lying about on her deck ---------------------------------------
+  //
+  // Vent cowls, drums, crates, hatch coamings and mooring gear. The same
+  // arrangement as the guardrail and for the same reasons: merged per watertight
+  // section so eighty-odd objects cost five draw calls, carrying that section's
+  // damage slot so they char with the plating they stand on, and handed to the
+  // wreck integrator a piece at a time when a shell reaches them. See
+  // deckProps.js — in particular for why they are solid to the player and not to
+  // the camera.
+  const deckProps = buildDeckProps({
+    materials,
+    onDetach: ({ geometry, position, quaternion, impulse, spin, mass }) => {
+      wreck.spawn(
+        geometry,
+        toWorld(position, new Vector3()),
+        _dq.copy(root.quaternion).multiply(quaternion),
+        impulse.applyQuaternion(root.quaternion).add(shipVelocity),
+        spin,
+        // A crate is a box of air with boards round it and it swims; everything
+        // else here is a steel casting or a drum full of oil and it does not.
+        { mass, buoyancy: mass < 80 ? 20 : 0 },
+      );
+    },
+  });
+  root.add(deckProps.object);
+  parts.set('deckProps', { object: deckProps.object, damage: null });
+
   // --- main battery ----------------------------------------------------------
   // throws if a superfiring turret would shoot through the one in front of it
   const clearances = checkSuperfiringClearance(TURRETS, TURRET_SPEC);
@@ -281,11 +324,13 @@ export function createBattleship({ shading, sunShadow }) {
         // has nothing left to be bolted to.
         flooding.wreck(cpt.id);
         railings.wreck(cpt.id);
+        deckProps.wreck(cpt.id);
         if (structure) structure.collapse(cpt.id, { x: 0, y: deckY(mid - 0.5), z: zOf(mid - 0.5) });
       },
       onRepair: () => {
         railWear.set(cpt.id, 0);
         railings.restore(); // a no-op once the first section has put it all back
+        deckProps.restore();
       },
     });
   }
@@ -320,7 +365,15 @@ export function createBattleship({ shading, sunShadow }) {
       // Running out of hit points does not decide where a thing breaks — that is
       // still whichever of its sections was thinnest, which is wherever it was
       // shot. It only decides that something has to give.
-      onKill: () => { if (structure) structure.weaken(id, 1.2); },
+      //
+      // For the two towers it decides something different, because neither of
+      // them leaves her: a destroyed pagoda is a wrecked pagoda still standing
+      // where it was, with everything that was hung on it down on the deck. See
+      // fittings.js.
+      onKill: () => {
+        if (id === 'bridge' || id === 'mainmast') fittings.collapse(id);
+        else if (structure) structure.weaken(id, 1.2);
+      },
       onRepair: () => { if (structure) structure.repair(); },
     });
   }
@@ -341,9 +394,27 @@ export function createBattleship({ shading, sunShadow }) {
   });
 
   // --- what a falling piece can land on ---------------------------------------
+  //
+  // `extra` is every level of the two towers, handed over by the builders that
+  // drew them rather than restated here. Without it the pagoda was a four-metre
+  // column inside a seventeen-metre tower as far as anything falling on it was
+  // concerned, and a yardarm shot off the foretop went through every gallery on
+  // the way down and came to rest inside one of them.
+  //
+  // Some of those levels can themselves be shot away — the mainmast's spotting
+  // top, its searchlight platform, the bridge wings — so a shape can name a
+  // fitting instead of a component, and stops being solid when that fitting
+  // leaves. Fitting ids and component ids share one namespace here, which is
+  // what lets both kinds go through `needs`.
   const colliders = createColliders({
     mounts,
-    alive: (id) => damage.alive(id),
+    alive: (id) => {
+      const f = fittings.get(id);
+      return f ? !f.gone : damage.alive(id);
+    },
+    extra: superUnits.flatMap((un) => un.solids || []),
+    // so a crater is a hole to a falling body as well as to the eye
+    removed: (x, y, z) => field.removedAt(x, y, z),
   });
   wreck.setColliders(colliders);
 
@@ -352,25 +423,15 @@ export function createBattleship({ shading, sunShadow }) {
   // meshes from, so the line a funnel breaks along is the funnel's own axis and
   // not an approximation of it.
   const funnelRake = (SUPER.funnel.rake * Math.PI) / 180;
+  //
+  // The pagoda and the mainmast are not in this list, and that is deliberate.
+  // Both used to be spined structure units, so enough damage at the foot sent
+  // the whole tower — or the whole tripod — over the side as one object. A
+  // funnel does that; an armoured conning column carrying the ship's fire
+  // control does not, and a tripod mast does not either. What comes off them is
+  // the top-hamper, piece by piece, and that lives in fittings.js. See
+  // buildBridge and buildMainmast for what is registered.
   const structureUnits = [
-    {
-      id: 'bridge',
-      object: parts.get('bridge').object,
-      mass: STRUCTURE.bridge.mass,
-      attach: STRUCTURE.bridge.attach,
-      foot: {
-        x: 0, y: deckY(SUPER.bridge.z), z: zOf(SUPER.bridge.z) - 1,
-        r: STRUCTURE.bridge.foot.r, strength: 3.4,
-      },
-      spine: {
-        base: new Vector3(0, deckY(SUPER.bridge.z) + STRUCTURE.bridge.spine.y0, zOf(SUPER.bridge.z) - 0.5),
-        dir: new Vector3(0, 1, 0),
-        length: STRUCTURE.bridge.spine.length,
-        radius: STRUCTURE.bridge.spine.radius,
-        sections: STRUCTURE.bridge.spine.sections,
-        strength: STRUCTURE.bridge.spine.strength,
-      },
-    },
     {
       id: 'funnel',
       object: parts.get('funnel').object,
@@ -388,24 +449,6 @@ export function createBattleship({ shading, sunShadow }) {
         radius: STRUCTURE.funnel.spine.radius,
         sections: STRUCTURE.funnel.spine.sections,
         strength: STRUCTURE.funnel.spine.strength,
-      },
-    },
-    {
-      id: 'mainmast',
-      object: parts.get('mainmast').object,
-      mass: STRUCTURE.mainmast.mass,
-      attach: STRUCTURE.mainmast.attach,
-      foot: {
-        x: 0, y: deckY(SUPER.aftSuper.z) + SUPER.aftSuper.h, z: zOf(SUPER.mainmast.z),
-        r: STRUCTURE.mainmast.foot.r, strength: 1.0,
-      },
-      spine: {
-        base: new Vector3(0, deckY(SUPER.aftSuper.z) + SUPER.aftSuper.h, zOf(SUPER.mainmast.z)),
-        dir: new Vector3(0, 1, 0),
-        length: STRUCTURE.mainmast.spine.length,
-        radius: STRUCTURE.mainmast.spine.radius,
-        sections: STRUCTURE.mainmast.spine.sections,
-        strength: STRUCTURE.mainmast.spine.strength,
       },
     },
   ];
@@ -467,6 +510,88 @@ export function createBattleship({ shading, sunShadow }) {
     },
   });
 
+  // --- the top-hamper: what comes off a tower that does not itself come off ----
+  //
+  // Registered here rather than in the builders because a fitting only becomes a
+  // fitting once there is a wreck integrator for it to fall into. Each builder
+  // hands over a list of groups it has already separated out for the purpose.
+  const _fitKick = new Vector3();
+  const _fitSpin = new Vector3();
+  const _fitWorld = new Vector3();
+
+  const fittings = createFittings({
+    onDetach: (ev) => {
+      root.updateMatrixWorld(true);
+      _sevM.copy(root.matrixWorld).invert().multiply(ev.object.matrixWorld);
+      _sevM.decompose(_sevPos, _sevQuat, _sevScale);
+      // Away from whatever hit it, and upward — a yardarm blown off a foretop
+      // does not drop, it is thrown. With no wound to go on (the whole tower has
+      // been destroyed and the rig is coming down with it) it simply falls.
+      _fitKick.set(0, 0, 0);
+      if (ev.from) {
+        _fitKick.set(ev.centre.x - ev.from.x, ev.centre.y - ev.from.y, ev.centre.z - ev.from.z);
+        if (_fitKick.lengthSq() < 1e-4) _fitKick.set(0, 1, 0);
+        _fitKick.normalize();
+        _fitKick.y = Math.abs(_fitKick.y) * 0.5 + 0.45;
+        _fitKick.normalize().multiplyScalar(3 + Math.random() * 7);
+        _fitKick.applyQuaternion(root.quaternion);
+      }
+      // spawnPiece adds her own way through the water to this; adding it here
+      // as well would throw the piece off at twice the speed she is making
+      _fitSpin.set(
+        (Math.random() - 0.5) * 3.4, (Math.random() - 0.5) * 2.2, (Math.random() - 0.5) * 3.4,
+      );
+      wreck.spawnPiece(ev.object, {
+        mass: ev.mass,
+        restPos: _sevPos.clone(),
+        restQuat: _sevQuat.clone(),
+        kick: _fitKick.clone(),
+        spin: _fitSpin.clone(),
+        componentId: ev.parent,
+        buoyancy: ev.buoyancy,
+      });
+      // Where it was bolted is now bare torn metal, and a fitting the size of a
+      // rangefinder takes some of the tower with it. Scaled by what came off:
+      // a bay of guardrail leaves a scar you can barely see, and twenty of them
+      // going at once must not add up to a blackened tower.
+      field.stamp({
+        x: ev.centre.x, y: ev.centre.y, z: ev.centre.z,
+        remove: Math.min(1.1, 0.15 + ev.mass / 4000),
+        scorch: 1.2 + Math.min(4.0, ev.mass / 1200),
+        heat: 0.7,
+      });
+      toWorld(ev.centre, _fitWorld);
+      burst.play('IMPACT', _fitWorld, null, 0.5 + Math.min(1.6, ev.mass / 2500));
+      // Losing it costs the thing it was bolted to. Shoot every aerial off the
+      // mainmast and the mainmast stops being a mainmast, without any single
+      // shell having had to destroy it.
+      if (ev.hpCost > 0) {
+        const c = damage.get(ev.parent);
+        if (c && c.status !== STATUS.DESTROYED) {
+          damage.hit(ev.parent, { damage: ev.hpCost, pen: 999 });
+        }
+      }
+    },
+  });
+
+  for (const un of superUnits) {
+    if (!un.fittings) continue;
+    for (const f of un.fittings) {
+      // The builder keeps a handle on the record so it can stop ticking a radar
+      // that is no longer on the ship.
+      f.record = fittings.add({
+        id: f.object.name,
+        object: f.object,
+        parent: un.id,
+        mass: f.mass,
+        strength: f.strength,
+        hpCost: f.hpCost,
+        topHamper: f.topHamper ?? true,
+        supportedBy: f.supportedBy || null,
+      });
+    }
+  }
+
   // --- the one door every damaging event comes through -------------------------
   //
   // A shell, a torpedo, a magazine, a funnel landing on an AA tub: all of them
@@ -477,6 +602,37 @@ export function createBattleship({ shading, sunShadow }) {
   const _local = new Vector3();
   const _sdir = new Vector3();
   const _hole = new Vector3();
+  const _propAt = new Vector3();
+  const _cookWorld = new Vector3();
+
+  // A drum going up.
+  //
+  // `deckProps.blast` has already worked the chain out — a drum that catches
+  // reaches for its neighbours, and they reach for theirs — and hands back every
+  // place a drum let go, in her frame. What that *is* happens here, because a
+  // burst, a scorch and a hit on the plating under it are all the ship's
+  // business and deckProps.js does not know about any of them.
+  //
+  // Deliberately not routed back through `strike`. A shell is one event with one
+  // set of consequences and it has already been through that door; a secondary
+  // going off in the middle of it would re-enter the whole thing, and the reason
+  // to want that — the blast sweeping more props — is exactly the part
+  // deckProps.blast has already done for itself.
+  function cookOff(places) {
+    if (!places || !places.length) return;
+    for (const at of places) {
+      // Fuel oil, not high explosive: a fireball and a black mark, not a hole.
+      // The plating under it takes a little of it, which is what makes leaving
+      // drums stacked against the superstructure a decision rather than dressing.
+      field.stamp({
+        x: at.x, y: at.y, z: at.z, remove: 0.35, scorch: 6.5, heat: 1,
+      });
+      toWorld(at, _cookWorld);
+      burst.play('HE', _cookWorld, null, 1.1);
+      const cpt = damage.compartmentAt(at.z / SHIP.length);
+      if (cpt) damage.hit(cpt.id, { damage: 22, pen: 999, fire: 0.5 });
+    }
+  }
   const _rootQi = new Quaternion();
 
   function strike({
@@ -536,7 +692,20 @@ export function createBattleship({ shading, sunShadow }) {
     // radius, the sphere never reaches the surface it went through and there is
     // nothing to see. That is exactly what was happening to every AP hit on the
     // ship — a 0.27 m entry hole centred 0.55 m behind the plate.
-    const depth = spec.punch ? rTear * 0.35 : spec.crater * 0.45;
+    //
+    // A light push now, because the tear is squashed along the same axis (see
+    // TEAR_FLATTEN and `stamp`) and a deep centre would put the whole of it
+    // under the surface it went through.
+    //
+    // Capped against the plating, because the push is measured from the surface
+    // and the depth limit below is measured from the *centre*: leave it
+    // proportional to the crater and a magazine puts its centre two metres
+    // inside her, at which point no limit about the centre can keep the tear out
+    // of the backing. A big wound is a wider chip, not a deeper one, so the
+    // centre of every one of them sits at about the same place in her plating.
+    const depth = spec.punch
+      ? rTear * 0.35
+      : Math.min(spec.crater * 0.15, PLATING * 0.35);
     const cx = _local.x + _sdir.x * depth;
     const cy = _local.y + _sdir.y * depth;
     const cz = _local.z + _sdir.z * depth;
@@ -546,7 +715,20 @@ export function createBattleship({ shading, sunShadow }) {
       // an entry hole still burns the paint round it
       field.stamp({ x: cx, y: cy, z: cz, remove: 0, scorch: spec.scorch * 0.6, heat: 1 });
     } else {
-      field.stamp({ x: cx, y: cy, z: cz, remove: rTear, scorch: spec.scorch, heat: 1 });
+      field.stamp({
+        x: cx, y: cy, z: cz, remove: rTear, scorch: spec.scorch, heat: 1,
+        axis: _sdir, flatten: TEAR_FLATTEN,
+        // Nothing chews further into her than her plating is thick — not a
+        // torpedo, not her own magazine. What a bigger wound gets is a *wider*
+        // chip, not a way in, which is the whole model: she is a piece of
+        // armour, and armour comes off in flakes. Keeping this unconditional
+        // also keeps the collision floor and the visible floor at the same
+        // depth, so what a man would stand on in there is what he can see.
+        //
+        // The margin is most of a voxel: the field is sampled trilinearly, so a
+        // limit cut exactly at the backing still smears half a cell past it.
+        depthLimit: Math.max(0.2, PLATING - depth - VOXEL * 0.7),
+      });
     }
     const wound = field.addWound({
       x: cx, y: cy, z: cz, r: Math.max(rCrater, 0.6), t: 0, id: componentId,
@@ -554,6 +736,17 @@ export function createBattleship({ shading, sunShadow }) {
 
     // --- 3. what it broke ------------------------------------------------------
     structure.wound({ x: cx, y: cy, z: cz, r: Math.max(rCrater, 0.5), severity });
+    // and what it took off the towers, which is a different question: a burst
+    // among a set of aerials takes the aerials, whatever it did to the tower
+    fittings.wound({ x: cx, y: cy, z: cz, r: Math.max(rTear, 1.2), severity });
+    // and what it swept off her deck. A drum is not a structure and has no
+    // strength to run out of: it is either inside the blast or it is not, and
+    // the radius is generous because a shell landing amidships ought to scatter
+    // cargo the player can see from across the deck rather than only the crate
+    // it landed on. deckProps.blast widens it again for the loose ones and
+    // narrows it for the lashed, which is what the rope is there to say.
+    _propAt.set(cx, cy, cz);
+    cookOff(deckProps.blast(_propAt, Math.max(rTear * 2.2, 5), { speed: 6 + 9 * severity }));
 
     // --- 4. what it opened to the sea ------------------------------------------
     // Only if the crater actually reached her skin. The area is the shell's, not
@@ -569,7 +762,9 @@ export function createBattleship({ shading, sunShadow }) {
             const cpt = damage.compartmentAt(cz / SHIP.length);
             if (cpt) {
               _hole.set(Math.sign(cx || 1) * half, cy, cz);
-              flooding.addHole(cpt.id, _hole, spec.hole * breach);
+              // The tear's own reach up and down her side: a rent that straddles
+              // the waterline takes water through the half of it that is under.
+              flooding.addHole(cpt.id, _hole, spec.hole * breach, Math.max(0.35, rTear * 0.8));
             }
           }
         }
@@ -600,10 +795,39 @@ export function createBattleship({ shading, sunShadow }) {
   const _plateKick = new Vector3();
   const _plateSpin = new Vector3();
   const _plateQ = new Quaternion();
+  const _plateLocal = new Vector3();
+  const _plateQi = new Quaternion();
+  const _plateHit = { normal: new Vector3(), id: null };
+
+  // A chunk must not be born inside her.
+  //
+  // The crater centre is pushed *inward* along the shell's path, which is what
+  // makes a hole rather than a scoop — and it means that for a hit on the
+  // weather deck the burst point is under the deck. A chunk started there is
+  // inside solid ship, and the contact solve cannot always get it out again: it
+  // wakes up wedged, pushes against two surfaces at once, and goes to sleep
+  // still half a metre into the plating. So it is walked out along the surface
+  // normal before it exists, and if it cannot be got out in four tries it is
+  // not thrown at all — no chunk is better than one buried in the deck.
+  function clearOfShip(worldPos) {
+    _plateQi.copy(root.quaternion).invert();
+    _plateLocal.copy(worldPos).sub(root.position).applyQuaternion(_plateQi);
+    for (let k = 0; k < 4; k++) {
+      const d = colliders.query(_plateLocal, _plateHit);
+      if (d <= 0) {
+        worldPos.copy(_plateLocal).applyQuaternion(root.quaternion).add(root.position);
+        return true;
+      }
+      _plateLocal.addScaledVector(_plateHit.normal, d + 0.3);
+    }
+    return colliders.query(_plateLocal, _plateHit) <= 0;
+  }
 
   function throwPlating(point, dirLocal, rTear) {
-    if (rTear < 1.2 || !platePieces.length) return;
-    const n = Math.min(3, 1 + Math.floor(rTear / 2.2));
+    if (rTear < 1.0 || !platePieces.length) return;
+    // As many chunks as there was hole. A shell tears a couple out; a torpedo
+    // strews the deck with them.
+    const n = Math.min(6, 2 + Math.floor(rTear / 1.4));
     // back out of the hole it made, biased upward — the same direction the
     // burst's own debris goes
     _plateV.copy(dirLocal).applyQuaternion(root.quaternion).negate();
@@ -613,6 +837,7 @@ export function createBattleship({ shading, sunShadow }) {
       const geo = platePieces[(Math.random() * platePieces.length) | 0];
       // clear of the plating it came out of, so it is not born inside her
       _plateAt.copy(point).addScaledVector(_plateV, 0.8 + Math.random() * rTear * 0.6);
+      if (!clearOfShip(_plateAt)) continue;
       _plateSpin.set(
         (Math.random() - 0.5) * 11, (Math.random() - 0.5) * 8, (Math.random() - 0.5) * 11,
       );
@@ -624,13 +849,15 @@ export function createBattleship({ shading, sunShadow }) {
         _plateV.y + (Math.random() - 0.5) * 0.5,
         _plateV.z + (Math.random() - 0.5) * 0.7,
       ).multiplyScalar(7 + Math.random() * 11).add(shipVelocity);
+      const scale = rTear * (0.4 + Math.random() * 0.45);
       wreck.spawn(
         geo, _plateAt, _plateQ, _plateKick, _plateSpin,
-        // A square metre of 25 mm plate is about 200 kg. Light, so it takes the
-        // coarse contact set and cannot hurt her — a piece of her own side
-        // landing on her deck is not a second hit — and it is steel, so it goes
-        // straight down when it reaches the water.
-        { scale: rTear * (0.45 + Math.random() * 0.4), mass: 240, light: true, buoyancy: 0 },
+        // A square metre of 25 mm plate is about 200 kg, and these are folded
+        // double or have a frame in them, so it goes as the area. Light, so it
+        // takes the coarse contact set and cannot hurt her — a piece of her own
+        // side landing on her deck is not a second hit — and it is steel, so it
+        // goes straight down when it reaches the water.
+        { scale, mass: 200 * scale * scale, light: true, buoyancy: 0 },
       );
     }
   }
@@ -735,6 +962,46 @@ export function createBattleship({ shading, sunShadow }) {
     return out.copy(v).applyQuaternion(root.quaternion).add(root.position);
   }
 
+  // --- the sea coming in -------------------------------------------------------
+  //
+  // A hole below the waterline is not a mark on her plating, it is a hole with
+  // the sea pouring through it, and until now you could only tell she was open
+  // by watching the tonnage climb in the readout. Nothing here decides anything:
+  // flooding.js has already worked out which holes are under and what head is
+  // across each of them this instant — Torricelli through a sharp-edged orifice,
+  // both ways round — so `h.wet` and `h.flow` are the answer and this only has
+  // to show it. Same droplets as everything else that throws water.
+  //
+  // It runs inboard and down, because that is where the water is going, and it
+  // stops the moment her roll lifts the hole clear.
+  const _holeAt = new Vector3();
+  const _holeDir = new Vector3();
+  const SPILL_BUDGET = 90; // droplets a frame across the whole ship
+
+  function spillIn(dt) {
+    if (!splash.mesh.visible) return;
+    let budget = SPILL_BUDGET;
+    for (const c of flooding.compartments) {
+      for (const h of c.holes) {
+        if (budget <= 0) return;
+        if (!h.wet || !(h.flow > 0.15)) continue;
+        // how hard it is running: the head across it, and how big it is
+        const rate = Math.min(16, 2 + h.flow * 3.5 + Math.sqrt(h.area) * 1.2);
+        h.spill = (h.spill || 0) + rate * dt;
+        const n = Math.min(budget, Math.floor(h.spill));
+        if (n <= 0) continue;
+        h.spill -= n;
+        budget -= n;
+        toWorld(h.p, _holeAt);
+        _holeDir.set(-Math.sign(h.p.x || 1) * 0.75, -0.66, 0).normalize()
+          .applyQuaternion(root.quaternion);
+        splash.burst(_holeAt, _holeDir, 2.5 + Math.sqrt(h.flow) * 3.0, n, {
+          spread: 0.5, size: 0.45, life: 1.2,
+        });
+      }
+    }
+  }
+
   const state = {
     flood: 0,
     floodZ: 0,
@@ -807,6 +1074,7 @@ export function createBattleship({ shading, sunShadow }) {
         if (show) mesh.userData.floodPlane.copy(c.plane);
       }
     }
+    spillIn(dt);
 
     _w.set(0, 0, 0);
     if (wind) _w.copy(wind);
@@ -906,6 +1174,7 @@ export function createBattleship({ shading, sunShadow }) {
     clearances,
     fx,
     railings,
+    deckProps,
     // these live in world space; main.js puts them in the scene itself
     debris, // the guardrail's name for `wreck`
     splash,
@@ -914,9 +1183,11 @@ export function createBattleship({ shading, sunShadow }) {
     turrets,
     aaMounts,
     damage,
-    // the four halves of destruction: the look, the breaking, the water, the wreckage
+    // the halves of destruction: the look, the breaking, what comes off the
+    // towers, the water, the wreckage
     field,
     structure,
+    fittings,
     flooding,
     wreck,
     shards,
@@ -936,10 +1207,23 @@ export function createBattleship({ shading, sunShadow }) {
       flooding.repair();
       field.reset();
       wreck.clear();
+      // after wreck.clear, which is what takes the detached fittings out of the
+      // wreck group before they are bolted back where they came from
+      fittings.repair();
       shards.clear();
       colliders.clearStumps();
       for (const mesh of floodWater.byCompartment.values()) mesh.visible = false;
       root.traverse((o) => { if (o.isMesh) delete o.userData.cutPlane; });
+      // The readout is driven off these and they are only recomputed on the
+      // flooding tick, so without this she reads as still holed for a moment
+      // after she has been put right.
+      state.flood = 0;
+      state.floodZ = 0;
+      state.tons = 0;
+      state.holes = 0;
+      state.burning = 0;
+      state.sinking = false;
+      state.foundered = false;
     },
     // aim every main turret at a world point; those that cannot bear stay at
     // their limit, which is the visible signal to the helm to turn the ship

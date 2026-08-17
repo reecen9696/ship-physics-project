@@ -5,7 +5,9 @@
 // had to know about (B) and a URL you had to type. They are the only controls
 // down here now, so they get to be plain buttons rather than another panel.
 
-export function createNavButtons({ onChangeBoat, testDestructionHref = '/test-destruction/' }) {
+export function createNavButtons({
+  onChangeBoat, onGoAboard = null, testDestructionHref = '/test-destruction/',
+}) {
   const root = document.createElement('div');
   root.id = 'navbtns';
 
@@ -23,6 +25,11 @@ export function createNavButtons({ onChangeBoat, testDestructionHref = '/test-de
 
   const change = btn('Change boat', () => onChangeBoat());
   change.title = 'Swap the helm between the battleship and the launch (B)';
+
+  if (onGoAboard) {
+    const aboard = btn('Go aboard', () => onGoAboard());
+    aboard.title = 'Stand on the battleship\'s deck (V)';
+  }
 
   document.body.append(root);
   return { root };

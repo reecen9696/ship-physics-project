@@ -10,7 +10,7 @@ import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
 import { skyColor } from '../ocean/sky.js';
 import {
-  section, sideAt, deckAt, keelAt, halfBeamAt, hullTSL, HULL_STATIONS,
+  section, sideAt, deckAt, keelAt, halfBeamAt, hullTSL, HULL_STATIONS, INNER_DECKS, PLATING,
 } from './hull.js';
 import { SHIP, COMPARTMENTS, SUPER } from './spec.js';
 
@@ -37,7 +37,10 @@ import { SHIP, COMPARTMENTS, SUPER } from './spec.js';
 // world-horizontal while she rolls, clipped to the hull's own section at
 // whatever height the flooding model has filled it to.
 
-const PLATE = 0.22; // how far the liner stands inside the skin, m
+// How far the backing stands inside her skin. This is PLATING — the depth of a
+// chip in her — because that is exactly what it is: the floor of any wound a
+// shell can make. See hull.js.
+const PLATE = PLATING;
 // How far in from the stem and the stern the end bulkheads stand, as a fraction
 // of her length — far enough not to share a plane with the hull's own end caps.
 const END_BULKHEAD = 0.014; // ~2.5 m
@@ -158,10 +161,19 @@ function linerSkin(sRange) {
   tmp.setIndex(tidx);
   tmp.computeVertexNormals();
   const nrm = tmp.getAttribute('normal').array;
-  for (let k = 0; k < rows * NR; k++) {
-    pos[k * 3] = outer[k * 3] - nrm[k * 3] * PLATE;
-    pos[k * 3 + 1] = outer[k * 3 + 1] - nrm[k * 3 + 1] * PLATE;
-    pos[k * 3 + 2] = outer[k * 3 + 2] - nrm[k * 3 + 2] * PLATE;
+  // Stepping a fixed distance inward along the normals is fine amidships and
+  // wrong at the ends: her stem is narrower than the step, so the two sides
+  // cross over each other and the liner turns inside out. The step is therefore
+  // capped by how wide she actually is at that station.
+  for (let i = i0; i <= i1; i++) {
+    const s = i / (NS - 1);
+    const step = Math.min(PLATE, Math.max(0.12, halfBeamAt(s) * 0.45));
+    for (let j = 0; j < NR; j++) {
+      const k = (i - i0) * NR + j;
+      pos[k * 3] = outer[k * 3] - nrm[k * 3] * step;
+      pos[k * 3 + 1] = outer[k * 3 + 1] - nrm[k * 3 + 1] * step;
+      pos[k * 3 + 2] = outer[k * 3 + 2] - nrm[k * 3 + 2] * step;
+    }
   }
   // reversed winding, so the inward faces are the front faces
   const idx = new Uint32Array(tidx.length);
@@ -206,9 +218,15 @@ export function buildInterior({ materials }) {
     // The inner bottom follows the keel and the other two follow the sheer,
     // which is what they do on a ship: the tank top is parallel to the bottom
     // and the decks are parallel to each other.
-    add(deckSlab(cpt.s[0], cpt.s[1], (s) => -keelAt(s) + 1.6));
-    add(deckSlab(cpt.s[0], cpt.s[1], (s) => deckAt(s) - 3.4));
-    add(deckSlab(cpt.s[0], cpt.s[1], (s) => deckAt(s) - 0.4, 0.15));
+    // The backing under her weather deck: the floor of a chip taken out of it,
+    // and the only thing you see through a shell hole. There used to be two
+    // more decks drawn under this one, and they were the "levels" you could see
+    // receding into the dark through any hole in her — which is what made a
+    // shell hole read as a way into a building. They are gone; what is left
+    // below the backing is the inner bottom, and nothing short of a torpedo
+    // ever opens far enough to show it.
+    add(deckSlab(cpt.s[0], cpt.s[1], (s) => deckAt(s) - PLATING, 0.15));
+    add(deckSlab(cpt.s[0], cpt.s[1], INNER_DECKS[0]));
 
     // The bulkheads that make this a compartment rather than a length of tube.
     // Only the after one of each, so neighbours share a wall.

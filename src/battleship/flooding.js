@@ -179,7 +179,7 @@ export function createFlooding() {
   // A wound that reaches the skin makes one. The area is the shell's, not the
   // crater's: a burst tears a big ragged patch of plating but what the sea
   // actually comes through is the hole in it.
-  function addHole(cptId, point, area) {
+  function addHole(cptId, point, area, r = 0.35) {
     const c = byId.get(cptId);
     if (!c) return null;
     // merge with an existing hole close by, so a salvo into one frame is one
@@ -187,10 +187,14 @@ export function createFlooding() {
     for (const h of c.holes) {
       if (h.p.distanceToSquared(point) < 16) {
         h.area = Math.min(h.area + area * 0.55, 140);
+        h.r = Math.max(h.r, r);
         return h;
       }
     }
-    const h = { p: point.clone(), area, cpt: c };
+    // `r` is how far it reaches above and below its centre. A tear that
+    // straddles the waterline is half a hole, and it is the half under that
+    // counts.
+    const h = { p: point.clone(), area, r, cpt: c };
     c.holes.push(h);
     if (c.holes.length > 14) c.holes.shift();
     return h;
@@ -205,6 +209,8 @@ export function createFlooding() {
     c.holes.push({
       p: new Vector3(0, c.keelY + 1.5, c.zMid),
       area: 90,
+      // open over her whole side, so the band is her whole depth
+      r: (c.deckY - c.keelY) * 0.5,
       cpt: c,
       gash: true,
     });
@@ -263,24 +269,39 @@ export function createFlooding() {
       c.waterplane = wp;
 
       // 3. what went in or out through the holes this step
+      //
+      // A hole is a hole, not a point. Testing the head at its centre says a
+      // four-metre tear whose bottom is a metre under and whose top is three
+      // metres clear is *dry*, which is the difference between a ship taking
+      // water through a rent in her side that you can watch the sea run into
+      // and a ship serenely ignoring it. So each is a vertical band `2r` deep:
+      // the part of it under the sea is what is open, and the head is measured
+      // to the middle of that part.
       let q = 0;
       for (const h of c.holes) {
         toWorld(h.p, _w);
-        const outside = seaAt(_w.x, _w.z) - _w.y;
-        const insideH = c.level - _w.y;
-        const hOut = Math.max(0, outside);
-        const hIn = Math.max(0, insideH);
+        const r = h.r || 0.35;
+        const lo = _w.y - r;
+        const span = 2 * r;
+        const sea = seaAt(_w.x, _w.z);
+        // how much of it the sea is over, and how much the water inside is over
+        const fOut = Math.max(0, Math.min(1, (sea - lo) / span));
+        const fIn = Math.max(0, Math.min(1, (c.level - lo) / span));
+        // mean head over the wetted strip: the surface, less the middle of it
+        const hOut = fOut > 0 ? sea - (lo + 0.5 * fOut * span) : 0;
+        const hIn = fIn > 0 ? c.level - (lo + 0.5 * fIn * span) : 0;
         const dh = hOut - hIn;
+        h.wet = fOut > 0;
+        h.flow = dh;
+        h.open = Math.max(fOut, fIn); // the share of it that is actually a hole
         if (Math.abs(dh) < 1e-3) continue;
         // Torricelli through a sharp-edged orifice, either way round. The "out"
         // case is not a nicety: a compartment flooded above a hole that the roll
         // has lifted clear pours back over the side, which is a thing you can
         // watch happen on a listing ship.
-        q += Math.sign(dh) * FLOODING.cd * h.area * Math.sqrt(2 * G * Math.abs(dh))
+        q += Math.sign(dh) * FLOODING.cd * h.area * h.open * Math.sqrt(2 * G * Math.abs(dh))
           * FLOODING.scale;
         if (hOut > 0) holeCount++;
-        h.wet = hOut > 0;
-        h.flow = dh;
       }
 
       // 4. down-flooding: once the deck edge over this compartment is under,
@@ -376,7 +397,7 @@ export function createFlooding() {
   // Open every compartment at once — the "watch her go down" key.
   function scuttle() {
     for (const c of compartments) {
-      addHole(c.id, new Vector3(0, c.keelY + 1.0, c.zMid), 8);
+      addHole(c.id, new Vector3(0, c.keelY + 1.0, c.zMid), 8, 1.2);
     }
   }
 

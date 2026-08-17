@@ -235,6 +235,119 @@ She is the ship only — the sim page carries no gunnery. Full design notes,
 including the component graph and why the whole ship shares two shaders, are in
 [`src/battleship/README.md`](src/battleship/README.md).
 
+### Walking her deck
+
+Press `V`, or the *Go aboard* button, and you are standing on the forecastle of a
+180 m ship that is pitching and rolling on the same wave field she floats on.
+WASD walks, shift runs, space jumps, the mouse looks; `ESC` or `V` puts you back
+outside. She holds whatever the telegraph and the wheel were set to, so you can
+ring down full ahead, go aboard, and walk her deck at 25 knots.
+
+The movement is a shooter's, not a person's, and deliberately: she is 180 m long
+and the point of being aboard is to get about her. A walk is 5 m/s and a sprint
+8.4, which puts her stem to stern in half a minute; the jump is 1.5 m and 0.85 s
+of hang, on gravity that is a third heavier going up and twice as heavy coming
+down, because asymmetric gravity is most of what makes a jump read as a jump. On
+the deck the legs own the velocity outright — 67 ms from a standstill to full
+speed and the same back — and in the air they do not: velocity is *added to*
+along the direction you are asking for and only up to the speed you are asking
+for, so a jump keeps every bit of the run it left with and can be steered but
+not braked. Coyote time and a jump buffer cover the two frames either side of an
+edge. All of it is in `src/player/spec.js`.
+
+Click to put a shell into her. It is the destruction rig's gunnery — the same
+ballistic ball, hit-tested along the segment it swept, resolved to the component
+that owns the mesh it struck, handed to `battleship.strike` — pointed by an eye
+standing on her own deck, so you can walk up to a turret and open it and then
+walk round the hole. `1`/`2`/`3` load AP, HE or a torpedo. `N` puts her into
+night. The sim page still has no gunnery of its own and is not getting one; what
+it has is the rig's, and the rig is still the place to watch her come apart from
+outside.
+
+**The architecture is two coordinate spaces, and everything else follows from
+it.** Walking on a moving ship reads like a character-controller problem and is
+not: the thing that breaks is collision against a *moving* collider, and no
+amount of tuning fixes that. Rapier's kinematic controller documents that it does
+not support rotational movement, and a deck that rolls is rotational movement.
+Parenting the player to the hull makes their world position the product of two
+transforms and multiplies every degree of hull error by their distance from her
+centre.
+
+So the player is simulated in a space in which the ship never moves. The
+geometry in there has zero velocity, which means there is nothing to tunnel
+through, no continuous collision detection, no contest between the hull's
+interpolation and the character solve — and the whole class of *ping-ponged
+through the plating* bugs stops existing by construction rather than by tuning.
+Rendering is one matrix multiply: `worldPose = hullMatrix · localPose`.
+
+What that space collides against is not a second description of the ship. It is
+`battleship/colliders.js` — the analytic loft, deckhouses, barbettes and
+turrets that wreckage already lands on and the camera is already kept out of.
+It was in her own frame all along; nobody had asked it to hold a person up
+before. A turret that has trained out from under you, and a funnel that has been
+shot away, are gone for the player too, because there is only one answer to
+where the ship is.
+
+The cost of the split is that her motion no longer physically reaches anyone
+aboard, and has to be put back deliberately. **That is the feature.** Physically
+honest motion in a heavy sea means nobody can cross the deck; adding it back as
+an explicit layer makes the amount of sway a number you can turn:
+
+- **Rotated gravity** does most of the work. Express world-down in her frame and,
+  as she heels, "down" tilts and everything drifts to leeward. Note what falls
+  out: the deck's normal in local space never changes, so *how tilted the deck
+  feels* is entirely the direction of apparent gravity, and no surface query is
+  needed to know it.
+- **Her linear acceleration**, finite-differenced from the buoyancy solver's
+  velocity, is the shove on a wave slam. Barely filtered, because the
+  high-frequency part of that term *is* the slam.
+- **Euler and centrifugal** scale with distance from her centre of mass, so they
+  are nothing amidships and considerable at the ends — which is why the
+  forecastle is genuinely unpleasant with the wheel hard over, and worth keeping.
+- **Coriolis** is skipped. It is nothing at walking speed.
+
+Traction is deliberately not free sliding, which is slapstick. Walking against
+the heel is slower, and past about 10° there is a bounded downhill drift. Both
+come off the horizontal component of apparent gravity.
+
+Two pieces of collision geometry are authored rather than derived, both for the
+reason §6 of the design note gives: catching a capsule on modelled detail feels
+terrible and generates edge cases forever. One invisible wall sits a little
+inboard of the guardrail, and the ladders to the shelter deck are stacks of
+boxes no riser taller than a step — which means the stair-stepping problem is
+solved by *not having any stepping code*, since the floor probe simply finds the
+next tread. The main battery gets a blockout that trains with the guns, because
+sixteen metres of barrel at chest height over the forecastle is otherwise
+something you walk straight through.
+
+The figure on deck is a capsule and a ball, standing in for a rigged model. The
+simulation deals in a feet position and a heading, so replacing it touches one
+file.
+
+Not built yet, and named where they go: space transitions (going over the side
+puts you back on deck rather than into the sea), multiplayer, and swimming. The
+networking decision that matters is already made, though — everything about the
+player is in local coordinates, and a player standing still on a ship making 16
+knots through heavy swell is a constant.
+
+```
+V            go aboard / back to the sea       WASD   walk
+SHIFT        run                               SPACE  jump
+CLICK        put a shell into her              1/2/3  AP · HE · torpedo
+N            night / day                       R      back to the spawn mark
+G            fly (debug)                       ESC    back to the sea
+```
+
+Tuning lives in `src/player/spec.js` and is on `poseidon.PLAYER` for poking at
+live; `inertiaScale` is the one to turn first (0 is a perfectly steady deck, 0.4
+is the default, 1.0 is honest and unplayable).
+
+`node probe-deck.mjs` runs the three build-order checkpoints headless — can a
+person get everywhere, is she rock solid on a heaving deck with nothing fed
+back, and is the deck still crossable with the inertia on. It costs about 9 µs
+per player per frame and takes a couple of seconds to run, which makes it the
+fastest way to find out whether a change to her geometry has walled somebody in.
+
 ### Destruction test rig — `/test-destruction/`
 
 A second page that exists to make the damage model observable: the same ocean,
@@ -269,7 +382,7 @@ This targets WebGPU only — there is no WebGL fallback.
 
 Helm: `W`/`S` throttle ahead and astern · `A`/`D` rudder · `R` reset the controlled ship ·
 `B` move the helm between the launch and the battleship (the battleship is selected at start) · `C` toggle camera
-follow · mouse drag orbits, wheel zooms.
+follow · `V` go aboard the battleship on foot · `N` night/day · mouse drag orbits, wheel zooms.
 
 Views (keys): `F` ocean · `5` height map · `1/2/3` cascade spectra.
 

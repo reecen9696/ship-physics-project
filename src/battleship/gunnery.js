@@ -106,10 +106,12 @@ export function createGunnery({ max = 48 } = {}) {
     live.splice(i, 1);
   }
 
-  // `target` is the object to test against; `seaHeight` is where the water is.
+  // `target` is what to test against — one object, or several, since there is
+  // usually more than one hull in the water. `seaHeight` is where the water is.
   // `onHit` gets the intersection plus the shell that made it; `onMiss` fires
   // when one goes into the sea instead.
   function update(dt, { target, seaHeight = 0, onHit = null, onMiss = null }) {
+    const targets = target && Array.isArray(target) ? target : (target ? [target] : null);
     for (let i = live.length - 1; i >= 0; i--) {
       const s = live[i];
       s.age += dt;
@@ -118,13 +120,13 @@ export function createGunnery({ max = 48 } = {}) {
       _step.copy(s.vel).multiplyScalar(dt);
       const dist = _step.length();
 
-      if (target && dist > 1e-4) {
+      if (targets && dist > 1e-4) {
         ray.set(_prev, _dir.copy(_step).divideScalar(dist));
         ray.far = dist;
         // A wrecked stretch of guardrail is hidden rather than removed, and the
         // raycaster does not check visibility — so a shell would detonate on a
         // rail that is not there any more.
-        const hit = ray.intersectObject(target, true).find((h) => isVisible(h.object));
+        const hit = ray.intersectObjects(targets, true).find((h) => isVisible(h.object));
         if (hit) {
           if (onHit) onHit({ ...hit, shell: s, speed: s.vel.length() });
           retire(i);

@@ -1,7 +1,7 @@
 import { Vector3 } from 'three/webgpu';
 import { SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS } from './spec.js';
 import {
-  deckAt, keelAt, sideAt, deckY, zOf,
+  deckAt, keelAt, sideAt, deckY, zOf, INNER_DECKS, PLATING,
 } from './hull.js';
 
 // What a falling piece of ship can land on.
@@ -31,7 +31,7 @@ const _p = new Vector3();
 // Each returns the penetration depth (> 0 when the point is inside) and writes
 // the outward surface normal into `n`.
 
-function boxHit(p, c, h, n) {
+export function boxHit(p, c, h, n) {
   const dx = h.x - Math.abs(p.x - c.x);
   if (dx <= 0) return 0;
   const dy = h.y - Math.abs(p.y - c.y);
@@ -62,7 +62,13 @@ function cylinderHit(p, base, axis, len, r, n) {
   return r - d;
 }
 
-export function createColliders({ mounts = null, alive = () => true } = {}) {
+export function createColliders({
+  mounts = null, alive = () => true, extra = [],
+  // `removed(x, y, z)` -> 0..1 of the material at that point that a shell has
+  // taken away. The damage field's own answer, so a hole is a hole to physics
+  // as well as to the shader. Null leaves her whole.
+  removed = null,
+} = {}) {
   const shapes = [];
 
   const box = (id, cx, cy, cz, hx, hy, hz, opts = {}) => shapes.push({
@@ -78,14 +84,20 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
   const A = SUPER.aftSuper;
   box('hull.aft', 0, deckY(A.z) + A.h / 2, zOf(A.z), A.w / 2, A.h / 2, A.l / 2);
 
-  // --- the bridge -------------------------------------------------------------
-  {
-    const z0 = zOf(SUPER.bridge.z);
-    const y0 = deckY(SUPER.bridge.z);
-    box('bridge', 0, y0 + 2.0, z0 - 1.0, 8.5, 2.0, 10.5, { needs: 'bridge' });
-    box('bridge', 0, y0 + 5.7, z0, 6.5, 1.7, 7.5, { needs: 'bridge' });
-    cyl('bridge', new Vector3(0, y0 + 7.4, z0 - 0.5), new Vector3(0, 1, 0), 33, 4.4,
-      { needs: 'bridge', severable: true });
+  // --- the towers -------------------------------------------------------------
+  // The pagoda's levels and the mainmast's platforms are not written out here.
+  // They come in through `extra`, from the builders that drew them — see
+  // `solidList` in superstructure.js for why. What used to be here was the
+  // column and the two base blockhouses and nothing else, which meant a tower
+  // seventeen metres across was four metres across to anything falling on it.
+  for (const sh of extra) {
+    if (sh.kind === 'box') {
+      box(sh.id, sh.c[0], sh.c[1], sh.c[2], sh.h[0], sh.h[1], sh.h[2],
+        sh.needs ? { needs: sh.needs } : {});
+    } else {
+      cyl(sh.id, new Vector3(...sh.base), new Vector3(...sh.axis), sh.len, sh.r,
+        sh.needs ? { needs: sh.needs } : {});
+    }
   }
 
   // --- the funnel -------------------------------------------------------------
@@ -98,13 +110,15 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
       { needs: 'funnel', severable: true });
   }
 
-  // --- the mainmast -----------------------------------------------------------
+  // --- the mainmast tripod ----------------------------------------------------
+  // The legs, which stay up whatever happens to what is standing on them — so,
+  // like the pagoda, always here. What stands on them comes in through `extra`
+  // and answers to its own fitting.
   {
     const M = SUPER.mainmast;
     cyl('mainmast',
       new Vector3(0, deckY(SUPER.aftSuper.z) + SUPER.aftSuper.h, zOf(M.z)),
-      new Vector3(0, 1, 0), M.h * 0.72, 1.4,
-      { needs: 'mainmast', severable: true });
+      new Vector3(0, 1, 0), M.h * 0.72, 1.4);
   }
 
   // --- turrets ----------------------------------------------------------------
@@ -187,6 +201,43 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
     grow(-SHIP.halfBeam, bot, -SHIP.length / 2, SHIP.halfBeam, top, SHIP.length / 2);
   }
 
+  // --- wreckage lying on her --------------------------------------------------
+  //
+  // A piece that has come to rest is frozen into the ship's frame, and the ship's
+  // frame is the frame every shape here is written in — so from that moment it is
+  // simply one more box in the list, and the next thing to come down lands on top
+  // of it instead of through it. Taken out again the moment it wakes or is
+  // retired.
+  //
+  // The box is axis-aligned in her frame, so a piece lying at an angle is
+  // approximated generously. That is the right way round for something meant to
+  // be walked round rather than through.
+  const bodyShapes = new Map();
+
+  function removeBody(key) {
+    const sh = bodyShapes.get(key);
+    if (!sh) return;
+    const i = shapes.indexOf(sh);
+    if (i >= 0) shapes.splice(i, 1);
+    bodyShapes.delete(key);
+  }
+
+  function addBody(key, c, h) {
+    removeBody(key);
+    const sh = {
+      kind: 'box',
+      id: 'wreckage',
+      owner: key, // so a body never contacts its own shape
+      c: c.clone(),
+      h: h.clone(),
+      min: new Vector3().subVectors(c, h),
+      max: new Vector3().addVectors(c, h),
+    };
+    bodyShapes.set(key, sh);
+    shapes.push(sh);
+    grow(sh.min.x, sh.min.y, sh.min.z, sh.max.x, sh.max.y, sh.max.z);
+  }
+
   // Can a body of this radius, centred here in the ship's frame, be touching any
   // part of her? The one question worth asking before the contact solve.
   function nearBounds(x, y, z, r) {
@@ -197,9 +248,36 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
 
   const _n = new Vector3();
   const _q = new Vector3();
+  const _hn = new Vector3();
 
-  // The hull itself, from the curves it was lofted from. Two surfaces matter:
-  // the weather deck a thing lands on, and the side it slides off over.
+  // The hull itself, from the curves it was lofted from.
+  //
+  // She is a *shell with decks in her*, not a solid. She used to be solid: any
+  // point inside the loft was inside the ship, and the push-out was toward
+  // whichever of the weather deck or the side was nearer. That is exactly right
+  // for the only question anyone was asking of it — where does a falling funnel
+  // stop — and it is useless for the question being asked now, which is what is
+  // at the bottom of a hole in her. A solid has nothing at the bottom of a hole;
+  // it has *more solid*, at whatever depth the crater happened to stop, floating
+  // above the deck you can plainly see down there.
+  //
+  // So what is solid is her plating and her decks, and the spaces between them
+  // are spaces. A piece that comes down on the weather deck still stops on the
+  // weather deck; a piece that comes down through a shell hole in it now falls
+  // into the compartment and lands on the deck below, which is the one you are
+  // looking at. See INNER_DECKS in hull.js — interior.js draws those same three
+  // surfaces, so what you stand on and what you see are the same thing.
+  //
+  // And where a shell has taken the material away, there is nothing here at all:
+  // the field that decides whether the shader draws a fragment is the same one
+  // that decides whether this reports a surface, so a hole is a hole to both.
+  // Her plating is solid this deep, which is PLATING — the same depth
+  // interior.js draws the backing at, so the floor of a chip in her is where it
+  // looks like it is. It doubles as the depth a fast arrival may bury itself
+  // and still be put back on top.
+  const PLATE_T = PLATING;
+  const DECK_T = 0.45; // a deck inside her, which does have two sides to it
+
   function hullHit(p, out) {
     const s = p.z / SHIP.length + 0.5;
     if (s <= 0.002 || s >= 0.998) return 0;
@@ -209,16 +287,51 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
     const half = sideAt(s, p.y);
     const ax = Math.abs(p.x);
     if (ax > half) return 0;
-    const dTop = top - p.y;
+    if (removed !== null && removed(p.x, p.y, p.z) > 0.5) return 0;
+
+    // Nearest way out. Zero means it is in none of them, which is to say it is
+    // in a compartment and there is nothing there to hold it up.
+    let best = Infinity;
+    const consider = (d, nx, ny, nz) => {
+      if (d >= 0 && d < best) { best = d; _hn.set(nx, ny, nz); }
+    };
+
+    // Her side and her weather deck push one way only, and that matters more
+    // than it looks. Treat the deck as a slab with two faces and anything that
+    // arrives fast enough to bury itself past the middle of it comes out of the
+    // *bottom* — the nearest way out is downward — so a bay of guardrail
+    // dropped from the foretop is quietly posted through her deck into the
+    // machinery spaces. Plating is thin; the thickness here is only how deep a
+    // fast arrival may be caught and put back. So the deck pushes up, the side
+    // pushes outboard, and neither ever pushes the other way.
+    const sx = Math.sign(p.x) || 1;
     const dSide = half - ax;
-    if (dTop <= dSide) { out.set(0, 1, 0); return dTop; }
-    out.set(Math.sign(p.x) || 1, 0, 0);
-    return dSide;
+    if (dSide < PLATE_T) consider(dSide, sx, 0, 0);
+    const dTop = top - p.y;
+    if (dTop < PLATE_T) consider(dTop, 0, 1, 0);
+
+    // The decks inside her are the other case: a thin floor with a space above
+    // it and a space below it, so it holds from either side. Only the inner
+    // bottom is one of these now — the backing under her weather deck is the
+    // underside of the plating slab above, and taking it twice would have the
+    // two fighting each other over the same metre.
+    for (let i = 0; i < INNER_DECKS.length; i++) {
+      const y = INNER_DECKS[i](s);
+      const above = p.y - y;
+      if (above >= 0) { if (above < DECK_T) consider(above, 0, 1, 0); } else if (above > -DECK_T) {
+        consider(DECK_T + above, 0, -1, 0);
+      }
+    }
+    if (best === Infinity) return 0;
+    out.copy(_hn);
+    return best;
   }
 
   // Deepest penetration among everything, in the ship's frame. `out.normal` is
   // the direction to push back along, `out.id` what was hit.
-  function query(p, out) {
+  // `ignore` is a resting body's own key: whatever it is, it is not standing on
+  // itself.
+  function query(p, out, ignore = null) {
     let best = 0;
     let bestId = null;
     // the hull
@@ -230,6 +343,7 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
       if (p.x < sh.min.x || p.x > sh.max.x) continue;
       if (p.y < sh.min.y || p.y > sh.max.y) continue;
       if (p.z < sh.min.z || p.z > sh.max.z) continue;
+      if (sh.owner !== undefined && sh.owner === ignore) continue;
       if (sh.needs && !alive(sh.needs)) continue;
       let d = 0;
       if (sh.kind === 'box') {
@@ -277,5 +391,9 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
     for (const sh of shapes) if (sh.severable) delete sh.stump;
   }
 
-  return { query, insideHull, nearBounds, bounds, setStump, clearStumps, shapes };
+  return {
+    query, insideHull, nearBounds, bounds, setStump, clearStumps, shapes,
+    addBody, removeBody,
+    clearBodies() { for (const key of [...bodyShapes.keys()]) removeBody(key); },
+  };
 }

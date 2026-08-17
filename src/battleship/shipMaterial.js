@@ -64,6 +64,12 @@ export function createShipMaterials({ shading, sunShadow, destruction = null }) 
     // the liner meshes behind her plating ride on this same program — see
     // interior.js, and `inside` in paint() below
     interior: true,
+    // The deckhouse scuttles are on this program rather than the glass one — a
+    // 0.6 m disc has no use for a mullion pattern — so the warm room behind them
+    // is one term here, gated by the lamp level packed into each scuttle's
+    // paintMask. Warmer and dimmer than the bridge windows: a scuttle is a
+    // cabin with one bulb in it, not a wheelhouse.
+    scuttleLamp: [0.48, 0.30, 0.13],
     plating: {
       strake: 1.9, // plate width across the girth, m
       butt: 6.2, // plate length fore-and-aft, m
@@ -170,6 +176,11 @@ const _c = new Color();
 export function paint(geometry, {
   color, roughness = 0.45, slot = 0, keepColor = false, paintMask = 0, metal = 0.65,
   inside = 0, plate = null,
+  // How brightly the room behind this pane is lit, 0..1, for the scuttles on the
+  // deckhouses. Quantised to four bits and packed into `paintMask` above the two
+  // flags — see the note there, and the lamp section in boatMaterial.js. It is
+  // per-geometry rather than per-fragment on purpose: one scuttle, one answer.
+  lamp = 0,
 }) {
   const n = geometry.getAttribute('position').count;
   if (!keepColor) {
@@ -184,7 +195,10 @@ export function paint(geometry, {
   geometry.setAttribute('metal', new Attr(new Float32Array(n).fill(metal), 1));
   geometry.setAttribute('dmgIndex', new Attr(new Float32Array(n).fill(slot), 1));
   const plated = plate === null ? (TURNED.test(geometry.type) ? 0 : 1) : plate;
-  geometry.setAttribute('paintMask', new Attr(new Float32Array(n).fill(paintMask + plated * 2), 1));
+  const lampQ = Math.round(Math.min(Math.max(lamp, 0), 1) * 15);
+  geometry.setAttribute('paintMask', new Attr(
+    new Float32Array(n).fill(paintMask + plated * 2 + lampQ * 4), 1,
+  ));
   // 1 on the inward-facing liner meshes: the same program shades them, but as
   // unpainted framed steel in a dark space rather than as her side.
   geometry.setAttribute('inside', new Attr(new Float32Array(n).fill(inside), 1));

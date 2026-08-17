@@ -151,9 +151,16 @@ export const COMPONENT_STATS = {
   'turret.*': { hp: 250, armor: 14, critical: ['magazine (if penetrated)'] },
   'casemate.*': { hp: 60, armor: 4 },
   'aa.*': { hp: 30, armor: 0 },
-  bridge: { hp: 180, armor: 10, critical: ['helm', 'fire control'] },
+  // The two towers are tougher than they were, and for a reason: neither of
+  // them comes off her any more, so their hit points are no longer "how long
+  // until this falls over" but "how long until there is nothing left up there
+  // worth calling a foremast". Most of the damage that gets them there arrives
+  // as the cost of the fittings shot off them one at a time — see fittings.js
+  // and the `hpCost` on each — and at the old numbers two shells finished the
+  // job before there was any of that to watch.
+  bridge: { hp: 320, armor: 10, critical: ['helm', 'fire control'] },
   funnel: { hp: 90, armor: 0, critical: ['speed -30%', 'smoke'] },
-  mainmast: { hp: 70, armor: 0, critical: ['spotting range'] },
+  mainmast: { hp: 150, armor: 0, critical: ['spotting range'] },
   steering: { hp: 120, armor: 3, critical: ['rudder jam'] },
   screws: { hp: 120, armor: 3, critical: ['propulsion'] },
 };
@@ -214,27 +221,19 @@ export const SHIP_CONFIG = {
 //
 // Masses are the real order of magnitude. They matter twice: for how long a
 // thing takes to come down, and for how hard it hits what it lands on.
+//
+// The pagoda foremast and the mainmast used to be in here and are not any
+// more. Neither of them leaves the ship: an armoured conning column carrying
+// the ship's fire control does not go over the side in one piece, and a tripod
+// mast does not either. What comes off those two is everything bolted to them,
+// one fitting at a time — see fittings.js, and the lists at the end of
+// buildBridge and buildMainmast.
 export const STRUCTURE = {
-  bridge: {
-    mass: 1_150_000,
-    attach: 'hull.mid',
-    foot: { r: 10.5 },
-    // the armoured column, from the top of the base blockhouse up. Everything
-    // hung off it — the houses, the platforms, the rangefinder — comes down
-    // with whatever part of the column it was bolted to.
-    spine: { y0: 7.4, length: 33.0, radius: 4.5, sections: 14, strength: 1.9 },
-  },
   funnel: {
     mass: 130_000,
     attach: 'hull.mid',
     foot: { r: 3.6 },
     spine: { y0: 0, length: 13, radius: 3.4, sections: 10, strength: 1.0, rake: 9 },
-  },
-  mainmast: {
-    mass: 85_000,
-    attach: 'hull.aft',
-    foot: { r: 4.6 },
-    spine: { y0: 0, length: 21.6, radius: 3.2, sections: 12, strength: 0.75 },
   },
   // The AA mounts are small, they stand on deckhouses, and they are not built
   // of anything: they go over as a unit or not at all.
@@ -299,12 +298,24 @@ export const FLOODING = {
   scale: 1.0,
 };
 
-// How much of a hole each kind of hit makes, in m^2, and how big a crater it
-// tears in the plating.
+// How much of a hole each kind of hit makes, in m^2, how big a crater it tears
+// in the plating, and how far the burn round it reaches.
+//
+// `scorch` is the radius of the blast mark, and it is much the largest of the
+// three because that is what a burst actually leaves: the hole is small, the
+// torn patch round it is bigger, and the black is bigger again — a shell that
+// takes two metres of plating out of a deckhouse blackens ten metres of it. It
+// was previously sized as though it were the crater's own halo, which read as a
+// smudge you had to be told about rather than as somewhere a shell went off.
 export const WOUNDS = {
-  AP: { crater: 0.42, scorch: 2.6, punch: true, hole: 0.35 },
-  HE: { crater: 2.6, scorch: 7.0, punch: false, hole: 3.4 },
-  TORP: { crater: 6.5, scorch: 9.0, punch: false, hole: 26 },
+  // None of these opens her. A wound tears a cavity in her plating with a floor
+  // to it — see PLATING in hull.js — and a bigger one is a wider cavity, not a
+  // deeper one. `hole` is separate and is what the sea comes through.
+  AP: { crater: 0.42, scorch: 4.4, punch: true, hole: 0.35 },
+  HE: { crater: 2.6, scorch: 11.0, punch: false, hole: 3.4 },
+  TORP: { crater: 6.5, scorch: 15.0, punch: false, hole: 26 },
+  // Left where it was. This one is already a third of her length across, and it
+  // is the one stamp big enough for its cost to be worth thinking about.
   MAGAZINE: { crater: 15, scorch: 34, punch: false, hole: 90 },
-  IMPACT: { crater: 1.4, scorch: 3.0, punch: false, hole: 0.6 },
+  IMPACT: { crater: 1.4, scorch: 5.0, punch: false, hole: 0.6 },
 };

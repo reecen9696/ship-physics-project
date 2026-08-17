@@ -49,6 +49,9 @@ export function createBoatMaterial({
   planks = 0, weather = 0, grain = 0.04, plating = null,
   damage = null, waterlinePaint = null, glass = null, destruction = null, interior = false,
   metalness = 0, anisotropy = 0.6, dispersion = 0.1, metalColor = [0.56, 0.57, 0.58],
+  // The colour of the room behind a lit scuttle. See the lamp section below;
+  // which scuttles are lit and how brightly is carried in the geometry.
+  scuttleLamp = null,
 }) {
   const mat = new MeshBasicNodeMaterial();
 
@@ -145,7 +148,19 @@ export function createBoatMaterial({
         // noise is what makes the edge ragged rather than a smooth blob. Doing
         // it here rather than by perturbing the position keeps the two sides of
         // a plate agreeing on where the hole is.
-        const thr = float(0.5).add(nz.sub(0.5).mul(0.30)).toVar();
+        //
+        // The backing is exempt, and that exemption is what makes a wound a
+        // chip rather than a way in. It is one surface a plating's thickness
+        // behind her skin (see PLATING in hull.js) and it is the floor of every
+        // hole — so it cannot itself be part of any hole, at any size, at any
+        // depth, however many bursts have overlapped there. Left subject to the
+        // same test it went with the plating in front of it, and what you then
+        // saw through a big enough hole was the *far* side of her curving away
+        // in the dark: a ship with a room in it rather than a piece of armour
+        // with a chip out of it. Pushing the threshold out of reach for these
+        // fragments costs one multiply-add and is unconditional, which a tuned
+        // crater depth could never be.
+        const thr = float(0.5).add(nz.sub(0.5).mul(0.30)).add(inside.mul(10)).toVar();
         Discard(rem.greaterThan(thr));
         rimT.assign(max(rimT, smoothstep(thr.sub(0.26), thr, rem)));
         scorchT.assign(f.g);
@@ -174,11 +189,15 @@ export function createBoatMaterial({
       // in battleship/scuttles.js, so that the ones in the hull are the same
       // fitting as the ones on the deckhouses two metres above them.
       //
-      // `paintMask` carries two flags in one float, because eight vertex
+      // `paintMask` carries three fields in one float, because eight vertex
       // buffers is the WebGPU limit and this geometry uses all eight: bit 0 is
       // the hull plating that takes this paint — so one shared material can
-      // paint a hull and leave a funnel alone — and bit 1 is rolled plate, read
-      // by the plating section below.
+      // paint a hull and leave a funnel alone — bit 1 is rolled plate, read by
+      // the plating section below, and everything from 4 up is a four-bit lamp
+      // level, read by the scuttle section. Packing rather than adding a ninth
+      // attribute is not squeamishness: a ninth does not fail at the draw call
+      // with something legible, it fails as an invalid render pipeline and the
+      // ship disappears.
       const mask = attribute('paintMask', 'float').toVar();
       const painted = mask.sub(floor(mask.mul(0.5)).mul(2));
       base.assign(mix(base, paintCol, painted.mul(fx.hullPaint.u)));
@@ -408,7 +427,11 @@ export function createBoatMaterial({
     if (plating !== null) {
       const P = plating;
       const flags = attribute('paintMask', 'float').toVar();
-      const gate = floor(flags.mul(0.5)).mul(fx.hullPlating.u).toVar();
+      // bit 1, extracted rather than shifted-and-truncated: the lamp level lives
+      // in the bits above this one, so `floor(flags / 2)` on its own would come
+      // back as 2 or 3 on a lit scuttle and multiply the seams up with it.
+      const gate = floor(flags.mul(0.5)).sub(floor(flags.mul(0.25)).mul(2))
+        .mul(fx.hullPlating.u).toVar();
       const { T, B } = platingFrame(N); // T along the run of the strakes, B across
 
       // plate coordinates, in plates
@@ -499,7 +522,9 @@ export function createBoatMaterial({
       const scorch = smoothstep(float(0).sub(0.25), float(0.25), dmg.sub(n.mul(0.7).add(n2.mul(0.3))));
       const soot = vec3(0.05, 0.045, 0.04).mul(n2.mul(0.5).add(0.6));
       const heat = base.mul(vec3(0.55, 0.42, 0.34)); // browned paint short of charring
-      base.assign(mix(base, mix(heat, soot, scorch), saturate(dmg.mul(1.6))));
+      // 2.2 rather than 1.6: the outer ring of a burn should still be plainly
+      // discoloured paint rather than fading out before it gets there.
+      base.assign(mix(base, mix(heat, soot, scorch), saturate(dmg.mul(2.2))));
       // What the per-component number is still allowed to do is take the shine
       // off. A part that has been hammered is dull and scuffed over all of it,
       // and that reads as wear without repainting it.
@@ -518,7 +543,15 @@ export function createBoatMaterial({
       const fr = abs(fract(positionLocal.z.div(1.2)).sub(0.5)).mul(2);
       const st = abs(fract(positionLocal.y.div(1.1)).sub(0.5)).mul(2);
       const ribs = smoothstep(float(0.72), float(0.95), max(fr, st));
-      const raw = vec3(0.115, 0.112, 0.105).mul(float(1).sub(ribs.mul(0.45)));
+      // Brighter than it was, and it has to be. This is bare unpainted steel in
+      // a space with no lamp in it, which argues for very dark — but the whole
+      // job of the liner is to be the thing you see through a hole, and at the
+      // old value it came out as flat black. A hole with black in it does not
+      // read as a compartment with a deck in it; it reads as a hole through the
+      // ship into nothing, which is the opposite of what it is for. The frames
+      // and stringers only tell you the space has depth and scale if there is
+      // enough light on them to see them by.
+      const raw = vec3(0.20, 0.196, 0.185).mul(float(1).sub(ribs.mul(0.42)));
       base.assign(mix(base, raw, inside));
       gloss.assign(mix(gloss, float(0.12), inside));
     }
@@ -613,9 +646,23 @@ export function createBoatMaterial({
     // came in through the hole you are looking through. Scaling the terms rather
     // than replacing them keeps this on one program, and keeps an interior
     // shading the same colour of daylight as the plating round the hole.
-    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.94))) : sun;
-    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.55))) : sky;
-    const lit = albedo.mul(litSun.add(litSky).add(bounce)).toVar();
+    //
+    // The one thing it must not do is go to black. Every one of these terms is
+    // multiplied by the surface normal one way or another, and the liner's
+    // normals face *inward* — away from the sun and away from most of the sky —
+    // so scaling them down as well left nothing at all, and a shell hole read as
+    // a window onto the void rather than as a way into a compartment. So the
+    // directional terms are still cut right down, and underneath them there is a
+    // floor: a flat fill, the colour of the daylight coming in through the hole,
+    // that does not care which way the surface is facing. It is what you would
+    // actually see — a dim space with light spilling into it — and it is the
+    // difference between seeing a deck in there and seeing nothing.
+    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.90))) : sun;
+    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.35))) : sky;
+    const fill = interior
+      ? grey(shading.horizon, 0.7).mul(inside.mul(0.30))
+      : vec3(0);
+    const lit = albedo.mul(litSun.add(litSky).add(bounce).add(fill)).toVar();
 
     // Rolled plate is scratched along the direction it was rolled, and on a ship
     // that is fore-and-aft. Only the steel is: paint has no grain, so the
@@ -707,12 +754,21 @@ export function createBoatMaterial({
       const paneId = floor(pu);
       const inPane = fract(pu);
 
-      // mullions between panes, and the frame at top and bottom of the band
+      // Mullions between panes, and the frame at top and bottom of the band.
+      //
+      // `inPane` runs 0..1 across a pane, so min(inPane, 1 - inPane) is the
+      // distance to the nearest mullion: zero *on* the bar and 0.5 in the middle
+      // of the glass. The smoothstep runs backwards — its edges are (mull,
+      // 0.2 mull) — so `vBar` is already 1 on the bar and 0 on the glass, and
+      // `frame` is that, not its complement. It was written as `1 - vBar`, which
+      // inverted the whole band: the panes were shaded as painted steel and the
+      // mullions between them got the lit room behind, so at night the ship
+      // showed rows of glowing vertical bars with dark glass between.
       const mull = fwidth(pu).mul(1.2).add(glass.mullion);
       const vBar = smoothstep(mull, mull.mul(0.2), min(inPane, float(1).sub(inPane)));
       const hy = positionLocal.y.div(float(glass.bandHalfHeight));
       const hBar = smoothstep(float(0.55), float(0.95), abs(hy));
-      const frame = saturate(float(1).sub(vBar)).max(hBar);
+      const frame = saturate(vBar).max(hBar);
 
       // reflection: smeared, because ship's windows are neither flat nor clean
       const R2 = reflect(V.negate(), N);
@@ -743,6 +799,30 @@ export function createBoatMaterial({
 
       // the frame is painted steel, not glass — shade it like the rest of the ship
       lit.assign(mix(pane, lit.mul(0.85), frame));
+    }
+
+    // --- lit scuttles ---------------------------------------------------------
+    //
+    // The round windows down the deckhouses have rooms behind them too, and at
+    // night they should say so — the same warm light the bridge windows carry,
+    // in the same places for the same reason. The ones cut in the hull are left
+    // dark: those are the messdecks, they are a deck below the weather deck, and
+    // a battleship at sea does not show a light out of her side.
+    //
+    // The level comes out of `paintMask`, four bits of it above the two flags —
+    // so which scuttle is burning a light and how brightly is decided once, in
+    // the geometry, and each one keeps its own answer. That matters more than it
+    // sounds: derive it here from a hash of the fragment's position instead and
+    // you cannot quantise finely enough to give one disc one value without
+    // splitting some other disc in half, and a porthole lit down one side is
+    // worse than no porthole lit at all.
+    if (scuttleLamp !== null) {
+      const lampFlags = attribute('paintMask', 'float').toVar();
+      const level = floor(lampFlags.mul(0.25)).div(15);
+      const night = shading.night;
+      lit.addAssign(vec3(...scuttleLamp)
+        .mul(level)
+        .mul(float(0.04).add(night.mul(2.1))));
     }
 
     // --- still hot ---------------------------------------------------------

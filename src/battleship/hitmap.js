@@ -1,5 +1,5 @@
 import { Vector3 } from 'three/webgpu';
-import { SHIP } from '../battleship/spec.js';
+import { SHIP } from './spec.js';
 
 // Which component did that mesh belong to?
 //

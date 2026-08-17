@@ -125,7 +125,29 @@ export function createDamageField({
 
   // Stamp a crater. `p` is in the ship's own frame; `remove` is the radius out
   // to which material is gone; `scorch` the radius of the burn halo.
-  function stamp({ x, y, z, remove = 2, scorch = null, heat = 1 }) {
+  //
+  // `axis` and `flatten` squash it. A burst against a surface tears a wide
+  // shallow bowl out of that surface; it does not excavate a sphere out of the
+  // ship. Stamped as a sphere, a shell on the weather deck removed the deck,
+  // the deckhead under it, the lower deck under that and the liner behind all
+  // three — leaving a shaft with nothing in it, which is neither what happens
+  // nor anything a man could ever walk across. Given the shell's own direction
+  // as the axis, the removal reaches `remove` across the surface and only
+  // `remove / flatten` into her, so what is under the hole is still there and
+  // is what you see through it.
+  //
+  // `depthLimit` is the hard floor: no material is removed further than this
+  // along the axis, whatever the severity and however many bursts have overlapped
+  // there. Squashing the tear alone is not enough for that — the shader's discard
+  // threshold moves about with noise, so the *ragged* edge of a tear reaches half
+  // again as far as its solid part, and it only takes a few overlapping bursts
+  // for that fringe to speckle its way through whatever was meant to be the floor
+  // of the hole. A stated limit is exact, and it is what makes a wound a chip out
+  // of her rather than a way into her.
+  function stamp({
+    x, y, z, remove = 2, scorch = null, heat = 1, axis = null, flatten = 1,
+    depthLimit = Infinity,
+  }) {
     const rScorch = scorch === null ? remove * 2.4 : scorch;
     const r = Math.max(remove + FEATHER, rScorch);
     const x0 = clampVox(Math.floor((x - r - min.x) / voxel), nx);
@@ -138,6 +160,12 @@ export function createDamageField({
 
     const invFeather = 1 / (2 * FEATHER);
     const invScorch = 1 / Math.max(rScorch, 0.01);
+    // the squash, as a unit axis and the factor the reach along it is divided by
+    const ax = axis ? axis.x : 0;
+    const ay = axis ? axis.y : 0;
+    const az = axis ? axis.z : 0;
+    const squash = axis && flatten !== 1;
+    const f2 = flatten * flatten;
     for (let k = z0; k <= z1; k++) {
       const pz = min.z + (k + 0.5) * voxel - z;
       dirty.add(k);
@@ -147,14 +175,28 @@ export function createDamageField({
         let o = idx(x0, j, k);
         for (let i = x0; i <= x1; i++, o += 4) {
           const px = min.x + (i + 0.5) * voxel - x;
-          const d = Math.sqrt(zy + px * px);
+          let d;
+          let past = false;
+          if (squash) {
+            const along = px * ax + py * ay + pz * az;
+            past = along > depthLimit;
+            const perp2 = zy + px * px - along * along;
+            d = Math.sqrt((perp2 > 0 ? perp2 : 0) + along * along * f2);
+          } else {
+            d = Math.sqrt(zy + px * px);
+          }
           // removed: 0.5 exactly at the crater wall, feathered either side
-          const rem = 0.5 + (remove - d) * invFeather;
+          const rem = past ? 0 : 0.5 + (remove - d) * invFeather;
           if (rem > 0) {
             const v = rem > 1 ? 255 : (rem * 255) | 0;
             if (v > data[o]) data[o] = v;
           }
-          const sc = 1 - d * invScorch;
+          // A burn is not a linear falloff from a point. The inner third of it
+          // is uniformly black — that is where the flame actually stood — and
+          // the fade is what happens outside that. A straight ramp puts the
+          // half-value at half the radius, which reads as a soft smudge with no
+          // centre to it however wide you make it.
+          const sc = Math.min(1, (1 - d * invScorch) * 1.55);
           if (sc > 0) {
             const v = sc > 1 ? 255 : (sc * 255) | 0;
             if (v > data[o + 1]) data[o + 1] = v;

@@ -11,11 +11,37 @@ import {
   strut, createRig, latticeMast, yardarm, topmast, aerialWire,
   airSearchArray, surfaceSearchDish, RIG,
 } from './aerials.js';
+import { fittingGroup } from './fittings.js';
 
 // Each builder returns { id, object, damage } where `damage` is the uniform
 // its materials share. Anything that should die as one thing (the pagoda, the
 // funnel) is one such unit; small fittings that only dress the ship are merged
 // into `decor` under the section they sit on.
+
+const UP = new Vector3(0, 1, 0);
+
+// What a builder hands to the collider set: the shapes of the things it has
+// just drawn, so that "there is a platform here" is stated once, where the
+// platform is built, rather than a second time as numbers copied into
+// colliders.js that drift the first time the tower is restyled.
+//
+// This exists because none of the pagoda's galleries or platforms was solid.
+// Only the armoured column was, and it is four metres across inside a tower
+// that is seventeen — so every piece of rig shot off the foretop fell straight
+// through every level on the way down and came to rest halfway inside one of
+// them. That is what the clipping was.
+function solidList() {
+  const list = [];
+  return {
+    list,
+    box: (id, cx, cy, cz, hx, hy, hz, opts = {}) => list.push({
+      kind: 'box', id, c: [cx, cy, cz], h: [hx, hy, hz], ...opts,
+    }),
+    cyl: (id, base, axis, len, r, opts = {}) => list.push({
+      kind: 'cyl', id, base: [base.x, base.y, base.z], axis: [axis.x, axis.y, axis.z], len, r, ...opts,
+    }),
+  };
+}
 
 function unit(id, materials) {
   const slot = materials.slotOf(id);
@@ -37,8 +63,17 @@ function unit(id, materials) {
 // --- pagoda bridge -----------------------------------------------------------
 // The signature of the type: a conning tower with the bridge levels stacked up
 // and around it, each level a little different, capped by the main rangefinder
-// and a pole topmast. Built as one destructible unit; the ship's helm and fire
-// control live here, so a kill on it is a kill on both.
+// and a pole topmast. The ship's helm and fire control live here, so a kill on
+// it is a kill on both.
+//
+// The tower itself does not come off her. It used to — it was a structure unit
+// with a spine, so enough damage low down and eleven hundred tonnes of armoured
+// column went over the side in one piece, which is not a thing that happens and
+// did not look like one either. What comes off a foremast under fire is
+// everything *hung on* it, and each of those is registered here as a fitting:
+// the guardrail round every platform and gallery, the signal yard, the topmast,
+// both radar sets, the rangefinder, the searchlights and the bridge wings. Each
+// is its own group and each is shot away on its own. See fittings.js.
 export function buildBridge({ materials }) {
   const u = unit('bridge', materials);
   const { object: g, mk, mkGlass } = u;
@@ -48,6 +83,11 @@ export function buildBridge({ materials }) {
 
   const z0 = zOf(SUPER.bridge.z);
   const y0 = deckY(SUPER.bridge.z);
+  // Everything that can be shot off her separately, collected as it is built
+  // and registered at the end. `fences` is guardrail; `rig` is aerial.
+  const fences = [];
+  const detachable = [];
+  const solid = solidList();
 
   // The pagoda foremast.
   //
@@ -64,9 +104,11 @@ export function buildBridge({ materials }) {
   const base = steel(new BoxGeometry(17, 4.0, 21));
   base.position.set(0, y0 + 2.0, z0 - 1.0);
   g.add(base);
+  solid.box('bridge', 0, y0 + 2.0, z0 - 1.0, 8.5, 2.0, 10.5);
   const base2 = steel(new BoxGeometry(13, 3.4, 15));
   base2.position.set(0, y0 + 5.7, z0);
   g.add(base2);
+  solid.box('bridge', 0, y0 + 5.7, z0, 6.5, 1.7, 7.5);
 
   // --- the column ------------------------------------------------------------
   // Slightly conical and tall enough to be seen between every platform.
@@ -74,6 +116,7 @@ export function buildBridge({ materials }) {
   const col = dark(new CylinderGeometry(2.1, 3.4, COL_TOP, 16));
   col.position.set(0, y0 + 7.4 + COL_TOP / 2, z0 - 0.5);
   g.add(col);
+  solid.cyl('bridge', new Vector3(0, y0 + 7.4, z0 - 0.5), UP, COL_TOP, 3.4);
   // legs bracing the column down onto the blockhouse, in the open
   for (let k = 0; k < 4; k++) {
     const a = (k / 4) * Math.PI * 2 + Math.PI / 4;
@@ -89,43 +132,86 @@ export function buildBridge({ materials }) {
   // somewhere a person stands is the *gap*: a top rail held clear of the deck on
   // thin stanchions, with daylight through it. A solid parapet at the same
   // height just looks like another box.
-  const railRing = (r, y, dz, stanchions = 16) => {
-    const top = dark(new TorusGeometry(r, 0.075, 5, 28));
-    top.rotation.x = Math.PI / 2;
-    top.position.set(0, y0 + y + 1.05, z0 + dz);
-    g.add(top);
-    const mid = dark(new TorusGeometry(r, 0.05, 5, 28));
-    mid.rotation.x = Math.PI / 2;
-    mid.position.set(0, y0 + y + 0.6, z0 + dz);
-    g.add(mid);
-    for (let k = 0; k < stanchions; k++) {
-      const a = (k / stanchions) * Math.PI * 2;
-      const st = dark(new CylinderGeometry(0.055, 0.055, 1.1, 5));
-      st.position.set(Math.cos(a) * r, y0 + y + 0.55, z0 + dz + Math.sin(a) * r);
-      g.add(st);
-    }
+  // Guardrail comes off her a *bay* at a time, not a gallery at a time.
+  //
+  // One run of rail round a platform used to be one object, so a shell into one
+  // side of the air-defence platform took the rail off the far side of it as
+  // well — which is both wrong and the thing that made a near miss look like it
+  // had swept the whole tower. A run is now cut into bays of about four metres,
+  // each its own group and its own fitting, so what goes is what was hit and
+  // the rest of the run is left standing with a gap in it.
+  //
+  // It also fixes the falling: a whole ring is a fifteen-metre bounding box
+  // with nothing in the middle of it, which lands on its corners and leaves the
+  // rail itself hanging in the air. A four-metre bay is nearly all rail.
+  const BAY = 4.2; // m of rail per detachable bay
+  let fenceN = 0;
+  const fence = () => {
+    const f = fittingGroup(g, `bridge.fence.${fenceN++}`);
+    fences.push(f);
+    return f;
   };
 
-  const railRect = (w, l, y, dz) => {
-    const bar = (len, horiz, px, pz, h) => {
-      const b = dark(new CylinderGeometry(0.07, 0.07, len, 5));
-      b.rotation.z = Math.PI / 2;
-      if (!horiz) b.rotation.y = Math.PI / 2;
-      b.position.set(px, y0 + y + h, z0 + dz + pz);
-      g.add(b);
-    };
-    for (const h of [1.05, 0.6]) {
-      bar(w, true, 0, l / 2, h); bar(w, true, 0, -l / 2, h);
-      bar(l, false, w / 2, 0, h); bar(l, false, -w / 2, 0, h);
+  const railRing = (r, y, dz, stanchions = 16) => {
+    const made = [];
+    const bays = Math.max(3, Math.min(8, Math.round((2 * Math.PI * r) / BAY)));
+    const span = (Math.PI * 2) / bays;
+    const perBay = Math.max(2, Math.round(stanchions / bays));
+    for (let s = 0; s < bays; s++) {
+      const f = fence();
+      made.push(f);
+      const a0 = s * span;
+      for (const [h, tube] of [[1.05, 0.075], [0.6, 0.05]]) {
+        const arc = new TorusGeometry(r, tube, 5, Math.max(4, Math.round(28 / bays)), span);
+        arc.rotateX(Math.PI / 2);
+        arc.rotateY(-a0);
+        arc.translate(0, y0 + y + h, z0 + dz);
+        f.add(dark(arc));
+      }
+      for (let k = 0; k < perBay; k++) {
+        const a = a0 + span * (k / perBay);
+        const st = dark(new CylinderGeometry(0.055, 0.055, 1.1, 5));
+        st.position.set(Math.cos(a) * r, y0 + y + 0.55, z0 + dz + Math.sin(a) * r);
+        f.add(st);
+      }
     }
-    for (const [px, pz] of [
-      [-w / 2, -l / 2], [0, -l / 2], [w / 2, -l / 2],
-      [-w / 2, 0], [w / 2, 0],
-      [-w / 2, l / 2], [0, l / 2], [w / 2, l / 2],
-    ]) {
-      const st = dark(new CylinderGeometry(0.055, 0.055, 1.1, 5));
-      st.position.set(px, y0 + y + 0.55, z0 + dz + pz);
-      g.add(st);
+    return made;
+  };
+
+  // The same, round a rectangular gallery: one bay per side, and the long sides
+  // cut in half again so a hit forward does not strip the rail abreast the
+  // funnel.
+  const railRect = (w, l, y, dz) => {
+    const run = (x0, z0r, x1, z1) => {
+      const f = fence();
+      const len = Math.hypot(x1 - x0, z1 - z0r);
+      const horiz = Math.abs(x1 - x0) > Math.abs(z1 - z0r);
+      for (const h of [1.05, 0.6]) {
+        const b = dark(new CylinderGeometry(0.07, 0.07, len, 5));
+        b.rotation.z = Math.PI / 2;
+        if (!horiz) b.rotation.y = Math.PI / 2;
+        b.position.set((x0 + x1) / 2, y0 + y + h, z0 + dz + (z0r + z1) / 2);
+        f.add(b);
+      }
+      // At cell centres, not at the ends: two runs meeting at a corner would
+      // otherwise each put a stanchion on the corner and the pair would z-fight
+      // against itself.
+      const n = Math.max(2, Math.round(len / 2.2));
+      for (let k = 0; k < n; k++) {
+        const t = (k + 0.5) / n;
+        const st = dark(new CylinderGeometry(0.055, 0.055, 1.1, 5));
+        st.position.set(x0 + (x1 - x0) * t, y0 + y + 0.55, z0 + dz + z0r + (z1 - z0r) * t);
+        f.add(st);
+      }
+    };
+    const hw = w / 2;
+    const hl = l / 2;
+    // fore and aft ends, then each side in two
+    run(-hw, -hl, hw, -hl);
+    run(-hw, hl, hw, hl);
+    for (const sx of [-1, 1]) {
+      run(sx * hw, -hl, sx * hw, 0);
+      run(sx * hw, 0, sx * hw, hl);
     }
   };
 
@@ -134,6 +220,7 @@ export function buildBridge({ materials }) {
     const b = steel(new BoxGeometry(w, h, l));
     b.position.set(0, y0 + y + h / 2, z0 + dz);
     g.add(b);
+    solid.box('bridge', 0, y0 + y + h / 2, z0 + dz, w / 2, h / 2, l / 2);
     if (hasWindows) {
       const band = glass(new BoxGeometry(w + 0.1, h * 0.34, l + 0.1));
       band.position.set(0, y0 + y + h * 0.72, z0 + dz);
@@ -147,6 +234,9 @@ export function buildBridge({ materials }) {
       const floor = steel(new BoxGeometry(bw, 0.22, bl));
       floor.position.set(0, y0 + y + h + 0.11, z0 + dz);
       g.add(floor);
+      // The gallery deck is what a falling yardarm lands on, and one day what
+      // somebody walks round, so it is solid as well as drawn.
+      solid.box('bridge', 0, y0 + y + h + 0.11, z0 + dz, bw / 2, 0.11, bl / 2);
       railRect(bw - 0.3, bl - 0.3, y + h + 0.22, dz);
       for (const sx of [-1, 1]) {
         for (const pz of [-l * 0.35, l * 0.35]) {
@@ -165,6 +255,7 @@ export function buildBridge({ materials }) {
     const d = steel(new CylinderGeometry(r, r, 0.3, 24));
     d.position.set(0, y0 + y, z0 + dz);
     g.add(d);
+    solid.cyl('bridge', new Vector3(0, y0 + y - 0.15, z0 + dz), UP, 0.3, r);
     railRing(r - 0.2, y + 0.15, dz, Math.max(10, Math.round(r * 2.6)));
     // brackets under the overhang, back to the column
     for (let k = 0; k < 6; k++) {
@@ -193,16 +284,23 @@ export function buildBridge({ materials }) {
   const drum = dark(new CylinderGeometry(2.3, 2.6, 2.4, 16));
   drum.position.set(0, y0 + topY + 1.2, z0 + 0.4);
   g.add(drum);
-  // the main rangefinder: a long horizontal tube out to both sides
+  solid.cyl('bridge', new Vector3(0, y0 + topY, z0 + 0.4), UP, 2.4, 2.6);
+  // The main rangefinder: a long horizontal tube out to both sides. Thirteen
+  // metres of optical tube sticking out either side of the director is the
+  // first thing to be shot away on any ship, so it comes off on its own.
+  const rfG = fittingGroup(g, 'bridge.rangefinder');
   const rf = dark(new CylinderGeometry(0.8, 0.8, 13, 14));
   rf.rotation.z = Math.PI / 2;
   rf.position.set(0, y0 + topY + 3.0, z0 + 0.8);
-  g.add(rf);
+  rfG.add(rf);
   for (const side of [-1, 1]) {
     const hood = dark(new BoxGeometry(1.4, 1.4, 1.6));
     hood.position.set(side * 6.5, y0 + topY + 3.0, z0 + 0.8);
-    g.add(hood);
+    rfG.add(hood);
   }
+  // Substantial: a wrecked bridge still has its rangefinder on it, bent. You
+  // have to shoot this one off.
+  detachable.push({ object: rfG, mass: 4200, strength: 1.1, hpCost: 22, topHamper: false });
 
   // --- the foremast rig ------------------------------------------------------
   // Above the director there is no more ship, only aerial. What was here was a
@@ -211,31 +309,63 @@ export function buildBridge({ materials }) {
   // make a warship's masthead. All of that is built in aerials.js and merged
   // into a single buffer, because it takes a hundred-odd thin members and one
   // draw call is what makes a hundred members affordable.
-  const rig = createRig(u.slot);
+  // Four rigs, not one. It is still one merged buffer per rig — that is what
+  // makes a hundred thin members affordable — but the lattice, the yard, the
+  // topmast and the wires are four separate ones, because they are four
+  // separate things to shoot off. Three extra draw calls buys a foretop that
+  // comes apart the way a real one does: the yard goes, then the wires it was
+  // carrying go with it, and the pole above stands there with nothing on it.
   const foot = new Vector3(0, y0 + topY, z0 - 1.0); // on the fire-control house roof
-  const head = latticeMast(rig, {
+  const rigMesh = (rig, name) => {
+    const gr = fittingGroup(g, name);
+    gr.add(rig.mesh(u.materials.body));
+    return gr;
+  };
+
+  const latticeRig = createRig(u.slot);
+  const head = latticeMast(latticeRig, {
     x: foot.x, z: foot.z, y0: foot.y, height: 12.0, base: 1.7, top: 0.8, bays: 6,
   });
   // the signal yard, combed with whip aerials, low enough to be worked from the
   // platform below it
-  const yard = yardarm(rig, { y: y0 + topY + 9.0, z: foot.z, span: 7.6, whips: 8 });
+  const yardRig = createRig(u.slot);
+  const yard = yardarm(yardRig, { y: y0 + topY + 9.0, z: foot.z, span: 7.6, whips: 8 });
   // and the topmast proper: the slim pole with the stacked dipoles on it, which
   // is the highest thing in the ship
-  const truck = topmast(rig, { at: head, height: 7.5, stacks: 5 });
+  const topRig = createRig(u.slot);
+  const truck = topmast(topRig, { at: head, height: 7.5, stacks: 5 });
   // aerial wires: down from under the truck to each yard tip, and on down to
-  // the top of the pagoda. Rigging, not structure — hair-thin on purpose.
+  // the top of the pagoda. Rigging, not structure — hair-thin on purpose, and
+  // the first thing to part when anything either end of them is hit.
+  const wireRig = createRig(u.slot);
   const trunk = truck.clone().setY(truck.y - 1.4);
-  aerialWire(rig, trunk, yard.port);
-  aerialWire(rig, trunk, yard.stbd);
-  aerialWire(rig, yard.port, new Vector3(-1.7, y0 + topY + 0.6, z0 - 2.1));
-  aerialWire(rig, yard.stbd, new Vector3(1.7, y0 + topY + 0.6, z0 - 2.1));
-  g.add(rig.mesh(u.materials.body));
+  aerialWire(wireRig, trunk, yard.port);
+  aerialWire(wireRig, trunk, yard.stbd);
+  aerialWire(wireRig, yard.port, new Vector3(-1.7, y0 + topY + 0.6, z0 - 2.1));
+  aerialWire(wireRig, yard.stbd, new Vector3(1.7, y0 + topY + 0.6, z0 - 2.1));
 
-  // platform at the masthead, under the topmast's foot
+  // platform at the masthead, under the topmast's foot — part of the pole, so
+  // it goes when the pole goes
+  const topG = rigMesh(topRig, 'bridge.topmast');
   const headPlat = steel(new CylinderGeometry(1.9, 1.9, 0.24, 16));
   headPlat.position.set(0, head.y - 0.12, foot.z);
-  g.add(headPlat);
-  railRing(1.7, topY + 12.0, -1.0, 12);
+  topG.add(headPlat);
+  solid.cyl('bridge.topmast', new Vector3(0, head.y - 0.24, foot.z), UP, 0.24, 1.9,
+    { needs: 'bridge.topmast' });
+
+  detachable.push(
+    // The lattice stands on the fire-control house, which is the tower itself,
+    // so nothing holds it up but her. Everything else up here stands on the
+    // lattice, or on what stands on the lattice.
+    { object: rigMesh(latticeRig, 'bridge.lattice'), mass: 3400, strength: 1.3, hpCost: 16, topHamper: false },
+    { object: rigMesh(yardRig, 'bridge.yard'), mass: 700, strength: 0.45, hpCost: 6, supportedBy: 'bridge.lattice' },
+    { object: topG, mass: 900, strength: 0.5, hpCost: 10, supportedBy: 'bridge.lattice' },
+    // rigged between the truck and the yard tips: either end going parts them
+    { object: rigMesh(wireRig, 'bridge.wires'), mass: 40, strength: 0.2, hpCost: 1, supportedBy: ['bridge.lattice', 'bridge.yard', 'bridge.topmast'] },
+  );
+  // The rail round the masthead platform stands on the topmast, so it goes when
+  // the topmast does rather than staying up there on its own.
+  for (const f of railRing(1.7, topY + 12.0, -1.0, 12)) f.userData.supportedBy = 'bridge.topmast';
 
   // The surface-search set, on a platform bracketed out forward of the mast.
   //
@@ -250,6 +380,7 @@ export function buildBridge({ materials }) {
   const dishPlat = steel(new CylinderGeometry(2.0, 2.0, 0.24, 16));
   dishPlat.position.set(0, y0 + DISH_Y, z0 + DISH_Z);
   g.add(dishPlat);
+  solid.cyl('bridge', new Vector3(0, y0 + DISH_Y - 0.12, z0 + DISH_Z), UP, 0.24, 2.0);
   railRing(1.8, DISH_Y + 0.12, DISH_Z, 12);
   for (const sx of [-1, 1]) {
     g.add(strut(
@@ -261,24 +392,52 @@ export function buildBridge({ materials }) {
       new Vector3(sx * 1.6, y0 + DISH_Y - 0.15, z0 + DISH_Z + 1.4), 0.09, dark,
     ));
   }
+  const dishG = fittingGroup(g, 'bridge.dish');
   const dish = surfaceSearchDish({ slot: u.slot, material: u.materials.body, r: 1.33 });
   dish.position.set(0, y0 + DISH_Y + 0.05, z0 + DISH_Z); // pedestal foot on the platform
-  g.add(dish);
+  dishG.add(dish);
+  const dishFit = { object: dishG, mass: 1100, strength: 0.55, hpCost: 14, topHamper: false };
+  detachable.push(dishFit);
   // A radar that has stopped turning is a dead radar, so she sweeps as long as
-  // the bridge is alive and freezes where she stands when it is not.
-  u.tick = (dt) => { if (u.damage.value < 0.999) dish.rotation.y += dt * 0.98; };
+  // the bridge is alive and freezes where she stands when it is not — and a
+  // radar that has been shot off the tower is not turning either, whatever the
+  // bridge is doing.
+  u.tick = (dt) => {
+    if (u.damage.value < 0.999 && !dishFit.record?.gone) dish.rotation.y += dt * 0.98;
+  };
 
   // --- things hung off the column: searchlights and bridge wings ------------
   for (const side of [-1, 1]) {
     // open bridge wing off the lower house
+    const wingG = fittingGroup(g, `bridge.wing.${side > 0 ? 'stbd' : 'port'}`);
     const wing = steel(new BoxGeometry(3.4, 0.35, 5.0));
     wing.position.set(side * 7.4, y0 + 10.9, z0 + 1.6);
-    g.add(wing);
+    wingG.add(wing);
+    solid.box(`bridge.wing.${side > 0 ? 'stbd' : 'port'}`,
+      side * 7.4, y0 + 10.9, z0 + 1.6, 1.7, 0.18, 2.5,
+      { needs: `bridge.wing.${side > 0 ? 'stbd' : 'port'}` });
+    detachable.push({ object: wingG, mass: 1800, strength: 0.8, hpCost: 4, topHamper: false });
     // searchlight on the 21 m platform
+    const slG = fittingGroup(g, `bridge.searchlight.${side > 0 ? 'stbd' : 'port'}`);
     const sl = dark(new CylinderGeometry(0.85, 0.85, 1.2, 12));
     sl.position.set(side * 3.6, y0 + 21.9, z0 + 0.6);
-    g.add(sl);
+    slG.add(sl);
+    detachable.push({ object: slG, mass: 400, strength: 0.4, hpCost: 2 });
   }
+
+  // Handed to the ship, which registers them with the fittings model once it
+  // has one. Guardrail is thin bar and comes off for nothing; it also costs the
+  // bridge nothing to lose, because a bridge with no rail round its galleries
+  // still cons the ship.
+  for (const d of detachable) d.kind = 'aerial';
+  u.fittings = [
+    ...fences.map((object) => ({
+      object, mass: 90, strength: 0.3, hpCost: 0, kind: 'fence',
+      supportedBy: object.userData.supportedBy || null,
+    })),
+    ...detachable,
+  ];
+  u.solids = solid.list;
   return u;
 }
 
@@ -353,50 +512,105 @@ export function buildMainmast({ materials }) {
   const dark = mk(STEEL_DARK, 0.4);
   const M = SUPER.mainmast;
   const z0 = zOf(M.z);
+  const detachable = [];
+  const solid = solidList();
   // it stands on the aft deckhouse, so it starts at that deckhouse's roof
   const y0 = deckY(SUPER.aftSuper.z) + SUPER.aftSuper.h;
   const top = new Vector3(0, y0 + M.h * 0.72, z0);
-  // three legs to a common head
+  // Three legs to a common head. The tripod is the mast, and it stays: what
+  // used to happen was that a hit anywhere took the whole thing over as one
+  // object, and what should happen — and now does — is that the things standing
+  // on the tripod come off it one at a time and leave the legs there.
   g.add(strut(new Vector3(0, y0, z0 + M.spread * 0.9), top, 0.32, dark));
   g.add(strut(new Vector3(-M.spread * 0.7, y0, z0 - M.spread * 0.55), top, 0.28, dark));
   g.add(strut(new Vector3(M.spread * 0.7, y0, z0 - M.spread * 0.55), top, 0.28, dark));
   // spotting top
+  const spotG = fittingGroup(g, 'mainmast.spottingtop');
   const spot = steel(new BoxGeometry(4.5, 2.2, 3.5));
   spot.position.copy(top).add(new Vector3(0, 1.1, 0));
-  g.add(spot);
+  spotG.add(spot);
+  solid.box('mainmast.spottingtop', 0, top.y + 1.1, z0, 2.25, 1.1, 1.75,
+    { needs: 'mainmast.spottingtop' });
+  // The spotting top is a plated house, not aerial: it stays until it is hit.
+  detachable.push({ object: spotG, mass: 2600, strength: 1.0, hpCost: 18, topHamper: false });
   // searchlight platform halfway up
+  const platG = fittingGroup(g, 'mainmast.platform');
   const plat = steel(new CylinderGeometry(3.2, 3.2, 0.3, 16));
   plat.position.set(0, y0 + M.h * 0.38, z0);
-  g.add(plat);
+  platG.add(plat);
+  solid.cyl('mainmast.platform', new Vector3(0, y0 + M.h * 0.38 - 0.15, z0), UP, 0.3, 3.2,
+    { needs: 'mainmast.platform' });
+  detachable.push({ object: platG, mass: 900, strength: 0.6, hpCost: 3, topHamper: false });
 
   // --- the mainmast rig ------------------------------------------------------
-  // A lattice topmast off the spotting top's roof, its own combed yard, and the
-  // air-search array at the head of it. The array is the one thing up here that
-  // has to be at the top of something: it is seven metres across and it turns,
-  // so anything standing beside it is something it would hit.
-  const rig = createRig(u.slot);
+  // A lattice topmast off the spotting top's roof, its own combed yard, the
+  // gaff the ensign flies from, and the air-search array at the head of it. The
+  // array is the one thing up here that has to be at the top of something: it
+  // is seven metres across and it turns, so anything standing beside it is
+  // something it would hit.
+  //
+  // Four rigs rather than one, for the same reason the foremast has four: each
+  // is a separate thing to be shot away, and the ship is far more interesting
+  // when she loses her air-search set and keeps her yard than when the whole
+  // mast goes at once.
   const foot = new Vector3(0, top.y + 2.2, z0); // the spotting top's roof
-  const head = latticeMast(rig, {
+  const rigMesh = (rig, name) => {
+    const gr = fittingGroup(g, name);
+    gr.add(rig.mesh(materials.body));
+    return gr;
+  };
+
+  const latticeRig = createRig(u.slot);
+  const head = latticeMast(latticeRig, {
     z: z0, y0: foot.y, height: 8.0, base: 1.3, top: 0.6, bays: 4,
   });
-  const yard = yardarm(rig, { y: foot.y + 2.8, z: z0, span: 5.4, whips: 6, whipH: 1.6 });
-  aerialWire(rig, new Vector3(0, head.y - 0.6, z0), yard.port);
-  aerialWire(rig, new Vector3(0, head.y - 0.6, z0), yard.stbd);
+  const yardRig = createRig(u.slot);
+  const yard = yardarm(yardRig, { y: foot.y + 2.8, z: z0, span: 5.4, whips: 6, whipH: 1.6 });
+  const wireRig = createRig(u.slot);
+  aerialWire(wireRig, new Vector3(0, head.y - 0.6, z0), yard.port);
+  aerialWire(wireRig, new Vector3(0, head.y - 0.6, z0), yard.stbd);
   // the gaff, raked aft off the mast: where the ensign flies under way
-  rig.tube(
+  const gaffRig = createRig(u.slot);
+  gaffRig.tube(
     new Vector3(0, foot.y + 1.0, z0 - 0.6),
     new Vector3(0, foot.y + 5.2, z0 - 4.4), 0.085, RIG, 0.42, 5,
   );
-  g.add(rig.mesh(materials.body));
 
+  // the masthead platform belongs to the lattice it stands on
+  const latticeG = rigMesh(latticeRig, 'mainmast.lattice');
   const headPlat = steel(new CylinderGeometry(1.5, 1.5, 0.22, 14));
   headPlat.position.set(0, head.y - 0.11, z0);
-  g.add(headPlat);
+  latticeG.add(headPlat);
+  solid.cyl('mainmast.lattice', new Vector3(0, head.y - 0.22, z0), UP, 0.22, 1.5,
+    { needs: 'mainmast.lattice' });
 
+  const arrayG = fittingGroup(g, 'mainmast.airsearch');
   const array = airSearchArray({ slot: u.slot, material: materials.body });
   array.position.set(0, head.y + 2.6, z0);
-  g.add(array);
-  u.tick = (dt) => { if (u.damage.value < 0.999) array.rotation.y += dt * 0.62; };
+  arrayG.add(array);
+  const arrayFit = {
+    object: arrayG, mass: 2200, strength: 0.6, hpCost: 20, topHamper: false,
+    supportedBy: 'mainmast.lattice',
+  };
+
+  // What is standing on what. The tripod legs hold the spotting top; the
+  // spotting top's roof holds the lattice and the gaff; the lattice holds the
+  // yard and — the one this list exists for — the air-search array at its head.
+  // Shoot the lattice away and a seven-metre radar must not be left hanging in
+  // the sky where the mast used to be.
+  detachable.push(
+    { object: latticeG, mass: 1800, strength: 0.9, hpCost: 12, topHamper: false, supportedBy: 'mainmast.spottingtop' },
+    { object: rigMesh(yardRig, 'mainmast.yard'), mass: 500, strength: 0.4, hpCost: 5, supportedBy: 'mainmast.lattice' },
+    { object: rigMesh(gaffRig, 'mainmast.gaff'), mass: 120, strength: 0.25, hpCost: 1, supportedBy: 'mainmast.spottingtop' },
+    { object: rigMesh(wireRig, 'mainmast.wires'), mass: 30, strength: 0.2, hpCost: 1, supportedBy: ['mainmast.lattice', 'mainmast.yard'] },
+    arrayFit,
+  );
+  u.tick = (dt) => {
+    if (u.damage.value < 0.999 && !arrayFit.record?.gone) array.rotation.y += dt * 0.62;
+  };
+  for (const d of detachable) d.kind = 'aerial';
+  u.fittings = detachable;
+  u.solids = solid.list;
   return u;
 }
 
@@ -422,7 +636,7 @@ export function buildDeckhouses({ materials }) {
   const scuttleGeoms = [];
   const SPACING = 1.9;
   function scuttle(x, y, z, side) {
-    pushScuttle(scuttleGeoms, new Vector3(x, y, z), new Vector3(side, 0, 0), u.slot);
+    pushScuttle(scuttleGeoms, new Vector3(x, y, z), new Vector3(side, 0, 0), u.slot, { lit: true });
   }
   // A run down one side, `z0` the foremost of it. Runs are kept well short of
   // the corners of the plate, because a scuttle in the corner reads as a mistake.

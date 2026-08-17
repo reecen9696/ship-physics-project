@@ -51,14 +51,41 @@ export function scuttleGeometry(p, n) {
   return { rim, glass };
 }
 
+// How brightly the room behind this scuttle is burning, 0 (dark) to 1.
+//
+// A row of scuttles all at the same brightness reads as a strip light behind a
+// perforated plate, which is what a uniform value looks like once it is the
+// brightest thing on a dark ship. What sells it is that a ship is a lot of
+// separate cabins and about a third of them are dark at any hour — so this is
+// hashed off the scuttle's own position, which means it is stable, it differs
+// between neighbours, and it costs nothing at run time.
+//
+// Deliberately not random: the same scuttle has to come out the same brightness
+// on every load, or the ship flickers between sessions.
+function lampAt(p) {
+  const h = Math.sin(p.x * 12.9898 + p.y * 78.233 + p.z * 37.719) * 43758.5453;
+  const f = h - Math.floor(h);
+  if (f < 0.34) return 0; // that one is turned in
+  return 0.45 + 0.55 * ((f - 0.34) / 0.66);
+}
+
 // Paint one scuttle's pair the way every scuttle on the ship is painted, and
 // push it onto `into`. `slot` is the damage slot of whatever it is cut into, so
 // a scuttle chars with the plating around it rather than being a component.
-export function pushScuttle(into, p, n, slot) {
+//
+// `lit` is for the ones on the deckhouses, which are cabins and offices above
+// the weather deck and show a light at night. The runs down the hull side are
+// never lit: those are the messdecks a deck below, and a ship at sea does not
+// show a light out of her side — which is also what keeps the two runs reading
+// as the same fitting in daylight and different things after dark.
+export function pushScuttle(into, p, n, slot, { lit = false } = {}) {
   const { rim, glass } = scuttleGeometry(p, n);
   into.push(
     paint(rim, { color: SCUTTLE.brass, roughness: 0.35, slot }),
-    paint(glass, { color: SCUTTLE.glass, roughness: 0.12, slot, metal: 0.15 }),
+    paint(glass, {
+      color: SCUTTLE.glass, roughness: 0.12, slot, metal: 0.15,
+      lamp: lit ? lampAt(p) : 0,
+    }),
   );
 }
 

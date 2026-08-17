@@ -17,8 +17,8 @@ import { capitalShipHandling } from '../boat/shipHandling.js';
 import { createBattleship } from '../battleship/Battleship.js';
 import { SHIP_CONFIG, COMPARTMENTS, TURRETS, AA_MOUNTS } from '../battleship/spec.js';
 import { createHUD } from '../util/hud.js';
-import { createGunnery, aimWithDrop, SHELL_TYPES } from './gunnery.js';
-import { createHitMap } from './hitmap.js';
+import { createGunnery, aimWithDrop, SHELL_TYPES } from '../battleship/gunnery.js';
+import { createHitMap } from '../battleship/hitmap.js';
 import { createReadout } from './readout.js';
 
 // Destruction test rig.
@@ -308,14 +308,21 @@ async function main() {
     } else if (k === 'k') {
       for (const t of battleship.turrets) battleship.damage.hit(t.id, { damage: 1e6, pen: 999 });
     } else if (k === 'm' || k === 'b') {
-      // Break the funnel and the mainmast without having to hit them, at the
-      // height the key says — `m` two-thirds up (the top comes off, the stump
-      // stays and keeps belching), `b` at the foot (the whole thing goes over).
-      // This is the one behaviour of the structure model that is tedious to
-      // reach with the mouse and the thing most worth watching.
-      const frac = k === 'm' ? 0.66 : 0.02;
-      battleship.structure.breakAt('funnel', frac);
-      battleship.structure.breakAt('mainmast', frac);
+      // Break the funnel without having to hit it, at the height the key says —
+      // `m` two-thirds up (the top comes off, the stump stays and keeps
+      // belching), `b` at the foot (the whole thing goes over). This is the one
+      // behaviour of the structure model that is tedious to reach with the
+      // mouse and the thing most worth watching.
+      battleship.structure.breakAt('funnel', k === 'm' ? 0.66 : 0.02);
+    } else if (k === 'j') {
+      // And the other half of it: strip the top-hamper off both towers, one
+      // fitting at a time from the masthead down. The towers themselves stay
+      // standing, because they are not things that come off her — see
+      // fittings.js.
+      const up = [...battleship.fittings.list]
+        .filter((f) => !f.gone)
+        .sort((a, b) => b.centre.y - a.centre.y);
+      for (const f of up.slice(0, 4)) battleship.fittings.detach(f, f.centre);
     }
   });
 
@@ -416,12 +423,15 @@ async function main() {
         + `heel ${ship.heel.toFixed(1)}° · trim ${ship.trim.toFixed(1)}° · draft ${ship.state.submerged.toFixed(2)} m`
         + ` · damage control ${dcEffort ? 'ON' : 'OFF'}\n`
         + `${battleship.state.holes} holes · ${Math.round(battleship.state.tons)} t of water`
-        + ` · ${battleship.wreck.count} pieces off her${battleship.state.foundered ? ' · FOUNDERED' : ''}\n`
+        + ` · ${battleship.wreck.count} pieces off her`
+        + ` · ${battleship.fittings.count}/${battleship.fittings.list.length} fittings aloft`
+        + `${battleship.state.foundered ? ' · FOUNDERED' : ''}\n`
         + `\n`
         + `CLICK to fire at the ship · DRAG to orbit\n`
         + `${SHELL_TYPES.map((t, i) => `${i + 1} = ${t.key}`).join(' · ')}\n`
         + `R = repair all · X = open her to the sea · K = kill all turrets\n`
-        + `M = break funnel/mast two-thirds up · B = break them at the foot\n`
+        + `M = break funnel two-thirds up · B = break it at the foot\n`
+        + `J = strip the four highest fittings off the towers\n`
         + `P = damage control on/off · V = view (${VIEWS[view].name}) · N = ${night ? 'day' : 'night'}`,
       );
     }

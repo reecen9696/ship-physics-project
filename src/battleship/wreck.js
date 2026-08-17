@@ -59,6 +59,7 @@ const CONTACT_K = 400;
 const CONTACT_C = 34;
 const FRICTION = 0.55;
 const MAX_PEN = 0.6; // never push back harder than this much penetration
+const MAX_SPIN = 25; // rad/s — a backstop on the contact solve
 
 const HINGE_RELEASE = 0.5; // rad — about 29 degrees
 const SLEEP_V = 0.4;
@@ -72,10 +73,12 @@ const IMPACT_V = 3.2;
 const IMPACT_COOL = 0.35;
 const IMPACT_APART = 8; // m — far enough along her to be a second thing hit
 
-// Under this and a piece is chaff, thrown away first when the pool is full. A
-// bay of guardrail is 60 kg and an AA tub is eleven tonnes; there is nothing
-// anywhere near the line.
-const CHAFF = 5000;
+// Under this and a piece is chaff, thrown away first when the pool is full.
+// Guardrail is 60 kg, an aerial wire 30, a yardarm 700, a piece of torn plating
+// 240 — all things there are a great many of and none of them worth keeping a
+// slot for. Above it are the things you would notice going: a rangefinder, a
+// spotting top, an AA tub at eleven tonnes, a funnel at a hundred and thirty.
+const CHAFF = 1200;
 
 // Floating. The spring is deliberately soft: omega = 3 rad/s is a four-second
 // bob, which is what a big hollow thing lying in a swell actually does, and it
@@ -189,6 +192,21 @@ function flattestAxis(h) {
   return h.y <= h.z ? 'y' : 'z';
 }
 
+// What a unit impulse at `r` along `dir` actually does to that point of the
+// body: the mass it behaves as if it had there, once its rotation about the
+// contact is counted. A long thin piece struck near its end has an effective
+// mass of a few kilograms however many tonnes it weighs, which is the whole
+// reason the contact solve has to be written in these terms and not in the
+// body's own mass.
+const _rn = new Vector3();
+function effMass(b, r, dir) {
+  _rn.crossVectors(r, dir);
+  const a = (_rn.x * _rn.x) / b.inertia.x
+    + (_rn.y * _rn.y) / b.inertia.y
+    + (_rn.z * _rn.z) / b.inertia.z;
+  return 1 / (1 / b.mass + a);
+}
+
 // Diagonal inertia of a uniform box, which is what every piece of this ship is
 // close enough to. Real principal axes would need the mesh's mass distribution
 // and would not change how any of this looks.
@@ -204,10 +222,13 @@ function boxInertia(mass, h) {
 }
 
 export function createWreck({
-  // Room for more than there used to be. A piece that lands on her now stays
-  // there instead of falling through her into the sea, so the deck accumulates
-  // — and a sleeping piece costs a transform a frame, not a contact solve.
-  material, max = 40, colliders: colliders0 = null, onSplash = null, onImpact = null,
+  // Room for a good deal more than there used to be. A piece that lands on her
+  // now stays there instead of falling through her into the sea, and there are
+  // far more pieces: sixty-odd bays of guardrail on the pagoda alone, plus the
+  // chunks blown out of her plating. All of it is meant to still be lying there
+  // later — one day somebody has to walk round it — and a sleeping piece costs
+  // a transform a frame, not a contact solve.
+  material, max = 64, colliders: colliders0 = null, onSplash = null, onImpact = null,
 }) {
   // The colliders are built from the mounts, and the mounts are built after
   // this is, so they are wired in afterwards rather than passed in.
@@ -221,8 +242,47 @@ export function createWreck({
   const ship = { position: new Vector3(), quaternion: new Quaternion(), velocity: new Vector3(), heel: 0 };
   const shipInv = new Quaternion();
 
+  // --- wreckage that other wreckage can land on --------------------------------
+  //
+  // A body that has gone to sleep is held in the ship's frame, which is the frame
+  // the colliders are written in, so it can simply be handed to them as another
+  // box. That is what stops the second thing to come down that hatchway going
+  // through the first, and it is the beginning of being able to walk round any of
+  // it.
+  //
+  // Not everything qualifies. A set of aerial wires is four hair-thin rods inside
+  // a fifteen-metre box; registering that box would put an invisible wall across
+  // the deck. So the test is density — mass against the volume of the box it
+  // claims — which separates a bay of guardrail (about 10 kg/m^3 of box) from a
+  // span of wire (a hundredth of that) without anything having to be labelled.
+  const MIN_DENSITY = 2.0; // kg/m^3 of bounding box
+  let keySeq = 0;
+  const _bmin = new Vector3();
+  const _bmax = new Vector3();
+
+  function makeSolid(b) {
+    if (!colliders || !b.key) return;
+    const vol = 8 * Math.max(b.half.x, 0.05) * Math.max(b.half.y, 0.05) * Math.max(b.half.z, 0.05);
+    if (b.mass / vol < MIN_DENSITY) return;
+    _bmin.set(Infinity, Infinity, Infinity);
+    _bmax.set(-Infinity, -Infinity, -Infinity);
+    for (let i = 0; i < b.pts.length; i++) {
+      _v.copy(b.pts[i]).applyQuaternion(b.shipQuat).add(b.shipPos);
+      _bmin.min(_v);
+      _bmax.max(_v);
+    }
+    _v.addVectors(_bmin, _bmax).multiplyScalar(0.5);
+    _v2.subVectors(_bmax, _bmin).multiplyScalar(0.5);
+    colliders.addBody(b.key, _v, _v2);
+  }
+
+  function unsolid(b) {
+    if (colliders && b.key) colliders.removeBody(b.key);
+  }
+
   function retire(i) {
     const b = bodies[i];
+    unsolid(b);
     group.remove(b.object);
     if (b.onRetire) b.onRetire(b);
     bodies.splice(i, 1);
@@ -308,6 +368,9 @@ export function createWreck({
       hitIds: new Set(),
       hitAt: new Vector3(),
       impactCool: 0,
+      // its handle in the collider set, once it is lying still enough to be
+      // something other pieces land on
+      key: `w${++keySeq}`,
       shipPos: new Vector3(),
       shipQuat: new Quaternion(),
     };
@@ -446,7 +509,7 @@ export function createWreck({
       _p.copy(b.pts[i]).applyQuaternion(b.object.quaternion).add(b.object.position);
       // world -> ship
       _v.copy(_p).sub(ship.position).applyQuaternion(shipInv);
-      const depth = colliders.query(_v, _hit);
+      const depth = colliders.query(_v, _hit, b.key);
       if (depth <= 0) continue;
       const c = contactPool[n++];
       c.world.copy(_p);
@@ -457,6 +520,22 @@ export function createWreck({
     }
     if (n === 0) { b.contacting = false; return 0; }
 
+    // --- the contact impulses ---------------------------------------------------
+    //
+    // The force is a spring out of the penetration and a damper against the
+    // approach, as it always was, but what it is allowed to *do* is now bounded
+    // by the effective mass at the contact — what a unit impulse there actually
+    // does to that point once the body's rotation about it is counted.
+    //
+    // Without the bound a contact is not passive. The force scales with the
+    // body's mass, and the response scales with the effective mass, which for a
+    // thin piece struck near its end is a small fraction of it; the point comes
+    // away faster than it arrived, the extra goes almost entirely into spin, the
+    // spin makes the *next* point arrive faster still, and it runs away in about
+    // a tenth of a second. A bay of guardrail dropped on the deck came off it at
+    // thirty-seven metres a second turning at two hundred and fifty radians, and
+    // a piece of mast reached four kilometres up. A contact may stop what is
+    // arriving and lift it out of the plating; it may not do more than that.
     const share = 1 / n;
     for (let i = 0; i < n; i++) {
       const c = contactPool[i];
@@ -464,19 +543,34 @@ export function createWreck({
       // velocity of this point of the body, relative to the ship's surface
       _v.copy(b.angVel).cross(_r).add(b.vel).sub(ship.velocity);
       const vn = _v.dot(c.normal);
-      const fn = Math.max(0, (CONTACT_K * c.depth - CONTACT_C * vn) * b.mass * share);
-      // normal impulse
-      _v2.copy(c.normal).multiplyScalar(fn * h);
-      // friction, opposing whatever is left of the sliding velocity
+
+      const effN = effMass(b, _r, c.normal);
+      let j = Math.max(0, (CONTACT_K * c.depth - CONTACT_C * vn) * b.mass * share) * h;
+      const jCap = Math.max(0, -vn) * effN + CONTACT_K * c.depth * effN * h;
+      if (j > jCap) j = jCap;
+      _v2.copy(c.normal).multiplyScalar(j);
+
+      // Friction along whatever is left of the slide: inside the Coulomb cone,
+      // and never more than arrests it.
       _v.addScaledVector(c.normal, -vn);
       const vt = _v.length();
-      if (vt > 1e-3) _v2.addScaledVector(_v, (-Math.min(FRICTION * fn, (vt * b.mass) / h) * h) / vt);
+      if (vt > 1e-3) {
+        _v.divideScalar(vt);
+        const jt = Math.min(FRICTION * j, vt * effMass(b, _r, _v));
+        _v2.addScaledVector(_v, -jt);
+      }
+
       b.vel.addScaledVector(_v2, 1 / b.mass);
       _r.cross(_v2);
       b.angVel.x += _r.x / b.inertia.x;
       b.angVel.y += _r.y / b.inertia.y;
       b.angVel.z += _r.z / b.inertia.z;
     }
+    // A backstop, because a solver that has got away from you once will do it
+    // again on geometry nobody thought of. Nothing that comes off a ship turns
+    // faster than this.
+    const spin2 = b.angVel.lengthSq();
+    if (spin2 > MAX_SPIN * MAX_SPIN) b.angVel.multiplyScalar(MAX_SPIN / Math.sqrt(spin2));
 
     // Arriving on something is a hit on it. The energy is real: a 130 t funnel
     // at 20 m/s carries 26 MJ, which is an order of magnitude more than a
@@ -508,6 +602,66 @@ export function createWreck({
     return n;
   }
 
+  // Push a body clear of whatever it has come to rest in.
+  //
+  // A penalty solver settles at whatever depth balances gravity — a couple of
+  // centimetres if it is lying flat on one thing, a good deal more if it has
+  // wedged between two — and then the body is frozen there for the rest of the
+  // battle. A couple of centimetres nobody sees; twenty is a yardarm sunk into
+  // a deck. So at the instant it goes to sleep, and only then, it is projected
+  // out of contact properly: find the deepest point, translate along that
+  // surface's normal, and do it again, because pushing it off one thing can put
+  // it into another. Six passes is far more than it ever needs.
+  // How far the worst of a body's contact points is inside the ship, with the
+  // surface it is inside written into `_n` (in her frame).
+  function deepestPen(b) {
+    let deepest = 0;
+    for (let i = 0; i < b.pts.length; i++) {
+      _p.copy(b.pts[i]).applyQuaternion(b.object.quaternion).add(b.object.position);
+      _v.copy(_p).sub(ship.position).applyQuaternion(shipInv);
+      const d = colliders.query(_v, _hit, b.key);
+      if (d > deepest) { deepest = d; _n.copy(_hit.normal); }
+    }
+    return deepest;
+  }
+
+  // Returns how deep it still is when it gives up — 0 if it got it out.
+  function settle(b) {
+    // Out along the surface it is inside. This is enough for almost everything:
+    // a body that has come to rest on a deck is a couple of centimetres into it
+    // and one pass clears it.
+    for (let iter = 0; iter < 6; iter++) {
+      const d = deepestPen(b);
+      if (d <= 0.005) return 0;
+      _n.applyQuaternion(ship.quaternion);
+      b.object.position.addScaledVector(_n, Math.min(d, 0.4) + 0.003);
+    }
+    // What is left is wedged: driven into a corner where two of her own shapes
+    // overlap — a deckhouse standing on a deck — so that leaving one puts it
+    // into the other and it pushes back and forth for ever. There is exactly
+    // one direction that always works on a ship, which is up out of her, so
+    // walk it up in short steps and stop at the first height that is clear of
+    // everything. Only ever runs on the frame a body falls asleep, and only for
+    // the few that get themselves stuck.
+    _v2.copy(UP).applyQuaternion(ship.quaternion);
+    for (let k = 0; k < 45; k++) {
+      b.object.position.addScaledVector(_v2, 0.1);
+      if (deepestPen(b) <= 0.005) return 0;
+    }
+    return deepestPen(b);
+  }
+
+  // How far into her a piece may be left sticking before it is thrown away
+  // instead of shown. A couple of centimetres is the contact solve at rest and
+  // nobody will ever see it; half a metre is a chunk of plating buried in the
+  // quarterdeck, and there is no good answer for that one — it got in there by
+  // being driven through a corner faster than the contacts could stop it, and
+  // it cannot be got out again without pushing it through something else. Since
+  // it is chaff, and since there are five more of it lying about, the honest
+  // thing is to not have it. Anything worth keeping is exempt and is left where
+  // it is: a funnel very slightly into a deck beats a funnel that vanished.
+  const WEDGED = 0.15;
+
   function stepFree(b, h) {
     b.vel.y -= GRAVITY * h;
     b.vel.multiplyScalar(1 / (1 + AIR_DRAG * h));
@@ -521,15 +675,18 @@ export function createWreck({
       if (rel < SLEEP_V && b.angVel.length() < SLEEP_W) b.still += h;
       else b.still = 0;
       if (b.still > SLEEP_TIME) {
-        // At rest on her. Freeze it into her frame; from here it is carried, not
+        // At rest on her. Lift it clear of anything it has settled into first —
+        // this is the last chance, because from here it is carried, not
         // simulated, which is what stops a hundred tonnes of dead funnel
         // shivering on the quarterdeck for the rest of the battle.
         shipInv.copy(ship.quaternion).invert();
+        if (colliders && settle(b) > WEDGED && b.mass < CHAFF) b.wedged = true;
         b.shipPos.copy(b.object.position).sub(ship.position).applyQuaternion(shipInv);
         b.shipQuat.copy(shipInv).multiply(b.object.quaternion);
         b.state = 'sleep';
         b.vel.set(0, 0, 0);
         b.angVel.set(0, 0, 0);
+        makeSolid(b);
       }
     } else {
       b.still = 0;
@@ -554,6 +711,7 @@ export function createWreck({
   // on what is sealed inside it, which is the one thing this cannot work out
   // for itself — so the caller says, in seconds.
   function enterWater(b, wy, low) {
+    unsolid(b);
     if (onSplash) onSplash(b.object.position, Math.abs(b.vel.y), b.mass);
     if (b.buoyancy > 0) {
       b.state = 'float';
@@ -645,6 +803,8 @@ export function createWreck({
 
     for (let i = bodies.length - 1; i >= 0; i--) {
       const b = bodies[i];
+      // it could not be put anywhere sane; see WEDGED
+      if (b.wedged) { retire(i); continue; }
       b.age += dt;
       if (b.impactCool > 0) b.impactCool -= dt;
 
@@ -670,6 +830,7 @@ export function createWreck({
         // She rolls far enough and it goes over the side, which is exactly what
         // happens to loose wreckage on a listing ship.
         if (Math.abs(ship.heel) > 21) {
+          unsolid(b);
           b.state = 'free';
           b.still = 0;
           b.hitIds.clear();
@@ -678,9 +839,18 @@ export function createWreck({
           b.angVel.set(0, 0, 0);
         }
       } else {
-        for (let s = 0; s < SUBSTEPS; s++) {
-          if (b.state === 'hinge') stepHinge(b, h);
-          else stepFree(b, h);
+        // A fast piece needs finer steps or it goes through her between them.
+        // Her plating catches a body over a metre or so of penetration; at
+        // thirty metres a second a 120 Hz step carries it a quarter of a metre,
+        // so there are only a handful of steps in which to stop it and a light
+        // one is through the deck and into the machinery spaces before the
+        // contacts have taken its way off. Only the fast ones pay for this, and
+        // they are the few that are still in the air.
+        const sub = b.vel.lengthSq() > 250 ? SUBSTEPS * 4 : SUBSTEPS;
+        const hh = Math.min(dt, 0.05) / sub;
+        for (let s = 0; s < sub; s++) {
+          if (b.state === 'hinge') stepHinge(b, hh);
+          else stepFree(b, hh);
         }
       }
 
@@ -704,6 +874,7 @@ export function createWreck({
     for (const b of bodies) {
       if (b.state !== 'sleep') continue;
       if (b.object.position.distanceTo(worldPoint) > radius) continue;
+      unsolid(b);
       b.state = 'free';
       b.still = 0;
       // It is falling again, so wherever it comes down is a new arrival.
