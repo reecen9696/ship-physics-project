@@ -62,7 +62,9 @@ function clampLength(v, max) {
 // drawn rotation. The *drawn* one is deliberate — a hull leaning into a turn
 // leans by a cosmetic roll the solver never sees, and a player standing on her
 // deck has to be thrown by the deck they can see, not by the one underneath it.
-export function createShipSpace({ id = 'ship', body, colliders, hull }) {
+export function createShipSpace({
+  id = 'ship', body, colliders, hull, skipShapes = null,
+}) {
   const matrix = new Matrix4();
   const matrixInv = new Matrix4();
   const quat = new Quaternion();
@@ -173,6 +175,8 @@ export function createShipSpace({ id = 'ship', body, colliders, hull }) {
     body,
     colliders,
     hull,
+    // Shapes this space's occupants do not collide with. See colliders.query.
+    skipShapes,
     syncHull,
     apparentGravity,
     toWorld,

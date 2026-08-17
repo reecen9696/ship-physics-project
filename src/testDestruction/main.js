@@ -17,7 +17,7 @@ import { capitalShipHandling } from '../boat/shipHandling.js';
 import { createBattleship } from '../battleship/Battleship.js';
 import { SHIP_CONFIG, COMPARTMENTS, TURRETS, AA_MOUNTS } from '../battleship/spec.js';
 import { createHUD } from '../util/hud.js';
-import { createGunnery, aimWithDrop, SHELL_TYPES } from '../battleship/gunnery.js';
+import { createGunnery, aimAt, SHELL } from '../battleship/gunnery.js';
 import { createHitMap } from '../battleship/hitmap.js';
 import { createReadout } from './readout.js';
 
@@ -189,10 +189,9 @@ async function main() {
   const trueWind = new Vector3();
 
   // --- gunnery ---------------------------------------------------------------
-  const gunnery = createGunnery();
+  const gunnery = createGunnery({ shading, smoke: battleship.fx });
   scene.add(gunnery.group);
   const hitMap = createHitMap(battleship);
-  let shellType = SHELL_TYPES[0];
 
   const readout = createReadout({
     groups: [
@@ -216,7 +215,7 @@ async function main() {
     const { id, component, direct, part } = hitMap.resolve(object, point);
     if (!component) return;
     const before = component.hp;
-    const t = shell.type;
+    const t = SHELL;
 
     // The direction matters: `strike` pushes the crater in along the shell's
     // path, because a burst *behind* the plating takes a disc of it away and a
@@ -225,7 +224,7 @@ async function main() {
     const { result } = battleship.strike({
       point,
       dir: _dir,
-      kind: t.key, // AP / HE / TORP — the same keys the wound table uses
+      kind: t.wound, // the entry in the wound table this round tears
       componentId: id,
       damage: t.damage,
       pen: t.pen,
@@ -274,11 +273,10 @@ async function main() {
     ship.group.updateMatrixWorld(true);
     const aimed = ray.intersectObject(ship.group, true)[0];
     const range = aimed ? aimed.distance : camera.position.distanceTo(controls.target);
-    gunnery.fire(
-      ray.ray.origin,
-      aimWithDrop(ray.ray.direction, range, shellType.speed, _aim),
-      shellType,
-    );
+    // The launch angle that actually puts a shell through what you clicked on,
+    // solved against the trajectory it will fly — see battleship/ballistics.js.
+    _aim.copy(ray.ray.direction).multiplyScalar(range);
+    gunnery.fire(ray.ray.origin, aimAt(_aim, _aim));
   });
 
   // --- keys ------------------------------------------------------------------
@@ -296,8 +294,7 @@ async function main() {
 
   addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
-    if (k >= '1' && k <= String(SHELL_TYPES.length)) shellType = SHELL_TYPES[Number(k) - 1];
-    else if (k === 'r') { battleship.repair(); gunnery.clear(); battleship.fx.clear(); ship.reset(); }
+    if (k === 'r') { battleship.repair(); gunnery.clear(); battleship.fx.clear(); ship.reset(); }
     else if (k === 'v') setView(view + 1);
     else if (k === 'p') dcEffort = dcEffort > 0 ? 0 : 1;
     else if (k === 'n') { night = !night; setTimeOfDay(night ? 0 : 1); }
@@ -397,6 +394,8 @@ async function main() {
       seaHeight: shipSea.height,
       onHit,
       onMiss,
+      wind: trueWind,
+      camera,
     });
 
     const ox = Math.round(camera.position.x / OCEAN_CELL) * OCEAN_CELL;
@@ -418,8 +417,8 @@ async function main() {
       readout.update(battleship.damage, battleship.state);
       hud.set(
         `DESTRUCTION TEST · ${(1000 / emaWall).toFixed(0)} fps · ${gunnery.count} shells in the air\n`
-        + `shell: ${shellType.key} — ${shellType.name} `
-        + `(dmg ${shellType.damage} · pen ${shellType.pen} · fire ${shellType.fire} · breach ${shellType.breach})\n`
+        + `shell: ${SHELL.key} — ${SHELL.name} `
+        + `(${SHELL.mass} kg at ${SHELL.muzzle} m/s · dmg ${SHELL.damage} · pen ${SHELL.pen})\n`
         + `heel ${ship.heel.toFixed(1)}° · trim ${ship.trim.toFixed(1)}° · draft ${ship.state.submerged.toFixed(2)} m`
         + ` · damage control ${dcEffort ? 'ON' : 'OFF'}\n`
         + `${battleship.state.holes} holes · ${Math.round(battleship.state.tons)} t of water`
@@ -428,7 +427,6 @@ async function main() {
         + `${battleship.state.foundered ? ' · FOUNDERED' : ''}\n`
         + `\n`
         + `CLICK to fire at the ship · DRAG to orbit\n`
-        + `${SHELL_TYPES.map((t, i) => `${i + 1} = ${t.key}`).join(' · ')}\n`
         + `R = repair all · X = open her to the sea · K = kill all turrets\n`
         + `M = break funnel two-thirds up · B = break it at the foot\n`
         + `J = strip the four highest fittings off the towers\n`

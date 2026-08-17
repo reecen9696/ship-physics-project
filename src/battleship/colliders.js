@@ -128,8 +128,18 @@ export function createColliders({
   // resting on thin air after the turret has trained out from under it.
   for (const t of TURRETS) {
     const y0 = deckY(t.z) + t.deckRise;
+    // The barbette, as one solid drum from the deck to the gunhouse.
+    //
+    // `barbette` marks it because on a superfiring turret it is not solid to
+    // everybody. B and X carry a working chamber inside the bandstand this drum
+    // stands in the middle of, and a man is meant to walk in through it — so the
+    // player skips this shape and gets the room, its walls and its trunk from
+    // deckAccess instead, which is the same pair the gunhouse door already works
+    // by. Everything else — a falling mast, a bay of guardrail, the camera —
+    // still wants the drum, because to them a barbette is exactly what it looks
+    // like.
     cyl(t.id, new Vector3(0, deckY(t.z), zOf(t.z)), new Vector3(0, 1, 0),
-      t.deckRise, TURRET_SPEC.barbetteR);
+      t.deckRise, TURRET_SPEC.barbetteR, { barbette: true, bandstand: t.bandstand > 0 });
     shapes.push({
       kind: 'turret',
       id: t.id,
@@ -333,8 +343,10 @@ export function createColliders({
   // Deepest penetration among everything, in the ship's frame. `out.normal` is
   // the direction to push back along, `out.id` what was hit.
   // `ignore` is a resting body's own key: whatever it is, it is not standing on
-  // itself.
-  function query(p, out, ignore = null) {
+  // itself. `skip` is a predicate over the shapes, for a caller that needs a
+  // different answer than everyone else — the player wants a gunhouse with a
+  // door in it rather than the solid block a falling mast needs.
+  function query(p, out, ignore = null, skip = null) {
     let best = 0;
     let bestId = null;
     // the hull
@@ -347,6 +359,7 @@ export function createColliders({
       if (p.y < sh.min.y || p.y > sh.max.y) continue;
       if (p.z < sh.min.z || p.z > sh.max.z) continue;
       if (sh.owner !== undefined && sh.owner === ignore) continue;
+      if (skip && skip(sh)) continue;
       if (sh.needs && !alive(sh.needs)) continue;
       let d = 0;
       if (sh.kind === 'box') {

@@ -1,5 +1,5 @@
 import { Vector2, Vector3, Quaternion } from 'three/webgpu';
-import { uniform } from 'three/tsl';
+import { uniform } from '../scene/uniforms.js';
 import { createWaterProbes } from './waterProbes.js';
 import { createBoatMesh, halfBeamAt as boatHalfBeamAt, HULL as BOAT_HULL } from './boatMesh.js';
 import { createHullSpray, sprayConfig } from './hullSpray.js';
@@ -750,7 +750,14 @@ export function createBoat(renderer, {
 // notch each, and the answer comes back over the next few seconds from the
 // engine room. Her wheel is put over directly — the rudder's own slew rate is
 // already the lag, and ramping the wheel on top of it would only be lag twice.
-export function attachBoatControls(boat, { isActive = () => true } = {}) {
+// `isActive` is whether these keys are the helm at this moment. `canReset` is the
+// same question for R, which is a separate predicate because R is destructive:
+// standing at the wheel in the wheelhouse *is* conning her, so W/S/A/D belong to
+// the helm there — but R at the wheel must not put the whole ship back to the
+// origin, and on foot it is the key that puts the player back on his spawn mark.
+export function attachBoatControls(boat, {
+  isActive = () => true, canReset = isActive,
+} = {}) {
   const keys = new Set();
   const editing = (e) => {
     const t = e.target;
@@ -765,7 +772,7 @@ export function attachBoatControls(boat, { isActive = () => true } = {}) {
       keys.add(k);
       e.preventDefault();
     }
-    if (k === 'r' && isActive()) boat.reset();
+    if (k === 'r' && canReset()) boat.reset();
     if (telegraph) {
       // one notch per press, not per frame — `repeat` is a held key autofiring
       if (!e.repeat && isActive()) {
@@ -782,6 +789,12 @@ export function attachBoatControls(boat, { isActive = () => true } = {}) {
   addEventListener('blur', () => keys.clear());
 
   return function tick(dt) {
+    // Nothing is written while these keys are somebody else's. The keys are still
+    // *collected* — the listener has no way to know, and unhooking it would lose
+    // the key that is already down — so the gate has to be here as well as in the
+    // listener. Without it, strafing left on her deck put her rudder over, which is
+    // exactly the sort of bug that reads as the ship having a mind of her own.
+    if (!isActive()) return;
     // +steer is starboard helm, so D (turn right) is +1
     const steer = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
     if (telegraph) {

@@ -6,6 +6,7 @@ import { createAvatar } from './avatar.js';
 import { createPlayerInput } from './input.js';
 import { createGunsight } from './gunsight.js';
 import { createTurretStation, LAYING } from './turretStation.js';
+import { createHelmStation } from './helmStation.js';
 import { HOUSE } from '../battleship/turretHouse.js';
 import { PLAYER } from './spec.js';
 
@@ -54,8 +55,31 @@ export function createFirstPerson({
   camera, controls, element, body, colliders, hull, materials, spawn,
   mounts = null, alive = () => true, turrets = [], damage = null,
   onFire = null, onSalvo = null, shellFor = null,
+  // The wheelhouse, if she has one: `{ wheelhouse }` off the ship's own bridge.
+  // With it, the helm becomes a station you walk up to like a turret's.
+  conn = null,
 }) {
-  const shipSpace = createShipSpace({ id: 'ship', body, colliders, hull });
+  const shipSpace = createShipSpace({
+    id: 'ship',
+    body,
+    colliders,
+    hull,
+    // A turret is one solid block to a falling mast and to the camera, and that
+    // is the right answer for both. It is the wrong one for a person: it turns
+    // the door they can see into a wall. The player gets the door-cut shell from
+    // deckAccess instead — see `houseShellSolids`.
+    //
+    // The same is true one deck down, and for the same reason. A superfiring
+    // turret's barbette is drawn as a drum four and a half metres across
+    // standing in the middle of its bandstand, and the ship's colliders make it
+    // solid from the deck all the way up. But the bandstand has a room in it and
+    // a passage through it, and that drum stood across the passage: you could
+    // walk in through the door, take two steps, and stop against nothing. The
+    // player skips it and gets the chamber's own floor, walls and trunk from
+    // deckAccess — see `chamberSolids` — which is the shape that is actually
+    // drawn in there.
+    skipShapes: (sh) => sh.kind === 'turret' || (sh.barbette && sh.bandstand),
+  });
   const access = createDeckAccess({ mounts, alive });
   const player = createCharacter({ space: shipSpace, extra: access, spawn });
   const avatar = createAvatar({ materials });
@@ -70,9 +94,18 @@ export function createFirstPerson({
     : [];
   const stationById = new Map(stations.map((s) => [s.id, s]));
 
+  // And one for the wheel. It is in the ship's own frame — the wheelhouse is part
+  // of the pagoda and the pagoda does not train — so there is no space to be handed
+  // into and walking up to it is simply walking, exactly as it is for the working
+  // chamber of a superfiring turret.
+  const helm = conn ? createHelmStation({
+    body, damage, wheelhouse: conn.wheelhouse ?? null,
+  }) : null;
+
   const sight = createGunsight();
 
   let active = false;
+  let conning = null; // the helm, if our hands are on it
   let laying = null; // the station whose gear is in our hands, or null
   let inside = null; // the station whose gunhouse we are standing in, or null
   let grace = 0;
@@ -99,13 +132,8 @@ export function createFirstPerson({
   function takeGun(station) {
     if (!station || !station.alive()) return;
     laying = station;
-    // Start from where the guns actually are, or the first thing the gear does
-    // is chase a demand nobody asked for.
     station.lay.held = true;
-    station.lay.demandYaw = station.mount.yaw;
-    station.lay.demandElev = station.mount.elev;
-    station.lay.trainRate = 0;
-    station.lay.elevRate = 0;
+    station.sync(); // start from where the guns actually are, in world angles
     avatar.group.visible = false;
     sight.show(true);
     applyFov();
@@ -119,8 +147,46 @@ export function createFirstPerson({
     applyFov();
   }
 
+  // --- and taking the wheel ---------------------------------------------------
+  //
+  // The same gesture, and a different thing at the end of it. With the wheel in
+  // your hands the body is parked — you are standing at it, not walking about —
+  // WASD is the helm rather than your legs, and the mouse is only your head: it
+  // turns the whole way round, because a man at a wheel with windows on all four
+  // sides can look at any of them.
+  //
+  // Nothing about the ship changes when you take it. She is steered by the same
+  // telegraph and the same wheel she was steered by from outside, so whatever she
+  // was doing she carries on doing until you ring something different. See
+  // helmStation.js.
+  function takeHelm() {
+    if (!helm || !helm.alive()) return false;
+    leaveGun();
+    conning = helm;
+    helm.hold();
+    avatar.group.visible = false;
+    applyFov();
+    return true;
+  }
+
+  function leaveWheel() {
+    if (!conning) return;
+    conning.release();
+    conning = null;
+    applyFov();
+  }
+
+  // Whichever set of controls is under your hand. One door for both, so E and the
+  // mouse button do not have to know which kind of gear they found.
+  function takeControls(station) {
+    if (!station) return;
+    if (station.kind === 'helm') takeHelm();
+    else takeGun(station);
+  }
+
   function fire() {
     if (!active) return;
+    if (conning) return; // both hands on the wheel
     if (laying) {
       if (laying.lay.reload > 0 || !laying.alive()) return;
       laying.lay.reload = LAYING.reload;
@@ -129,7 +195,7 @@ export function createFirstPerson({
     }
     // On foot: walking up to a set of training gear and pressing the button is
     // the same click that would otherwise put a shell into her.
-    if (near) { takeGun(near); return; }
+    if (near) { takeControls(near); return; }
     if (onFire) onFire();
   }
 
@@ -149,53 +215,85 @@ export function createFirstPerson({
 
   // --- doors -----------------------------------------------------------------
 
+  // Is a point in this room, with a margin? Negative tightens it.
+  const roomHas = (p, m) => Math.abs(p.x) < HOUSE.halfW + m
+    && p.z > HOUSE.aft - m && p.z < HOUSE.fwd + m
+    && p.y > HOUSE.floor - 0.8 && p.y < HOUSE.ceiling + m;
+
+  const _cross = new Vector3();
+  const _crossVel = new Vector3();
+
+  // Crossing a gunhouse door.
+  //
+  // It is not a teleport, and it took making it one to see why it must not be.
+  // The two frames describe the same world: a body standing in a doorway is in
+  // the same place whichever of them you write its position in. So the crossing
+  // is a *change of reference frame* and nothing else — convert the position,
+  // convert the velocity, turn the heading by the turret's bearing, and the man
+  // does not move at all. No snap, no landing spot, no respawn. The camera is
+  // where it was because the eye is where it was.
+  //
+  // The boundary is the room itself rather than a trigger box, which is what
+  // gives it the asymmetric margins the design note asks for: you are handed in
+  // once you are properly inside (-0.15 m) and handed back only once you are
+  // properly out (+0.35 m), and half a metre of hysteresis sits between them.
   function crossDoors(dt) {
     grace = Math.max(grace - dt, 0);
-    if (grace > 0 || laying) return;
+    if (grace > 0 || laying || conning) return;
 
     if (inside) {
-      // On the way out. These volumes are against the inside of each door, and
-      // the landing is well clear of them, so there is nothing to oscillate on.
-      for (const d of inside.doorsIn) {
-        if (!inBox(player.position, d)) continue;
-        const out = inside.doorsOut.find((o) => o.side === d.side) ?? inside.doorsOut[0];
-        inside = null;
-        player.rehome(shipSpace, access);
-        avatar.group.parent?.remove(avatar.group);
-        body.group.add(avatar.group);
-        _v.copy(out.c);
-        _v.x += Math.sign(out.c.x) * (out.h.x + 0.75);
-        _v.y = out.sill + 0.5;
-        player.teleport(_v, Math.sign(out.c.x) > 0 ? Math.PI / 2 : -Math.PI / 2);
-        grace = GRACE;
-        return;
-      }
+      if (roomHas(player.position, 0.35)) return;
+      const st = inside;
+      st.space.velocityToParent(player.position, player.velocity, _crossVel);
+      st.space.toParent(player.position, _cross);
+      inside = null;
+      player.rehome(shipSpace, access);
+      player.position.copy(_cross);
+      player.velocity.copy(_crossVel);
+      player.state.heading += st.space.yaw;
+      avatar.group.parent?.remove(avatar.group);
+      body.group.add(avatar.group);
+      grace = GRACE;
       return;
     }
 
-    // On the way in. The entry volumes are stated in the ship's frame at each
-    // turret's rest bearing, because the deck you are standing on does not train
-    // and neither does a bandstand.
     for (const st of stations) {
-      if (!st.alive()) continue;
-      for (const d of st.doorsOut) {
-        if (!inBox(player.position, d, 0.15)) continue;
-        const land = st.landing(d.side);
-        player.rehome(st.space, null);
-        inside = st;
-        avatar.group.parent?.remove(avatar.group);
-        st.mount.yawPivot.add(avatar.group);
-        player.teleport(land.position, land.heading);
-        grace = GRACE;
-        return;
-      }
+      // A working chamber is part of the ship, so there is no boundary to cross.
+      if (st.onBandstand || !st.alive()) continue;
+      st.space.fromParent(player.position, _cross);
+      if (!roomHas(_cross, -0.15)) continue;
+      st.space.velocityFromParent(player.position, player.velocity, _crossVel);
+      inside = st;
+      player.rehome(st.space, null);
+      player.position.copy(_cross);
+      player.velocity.copy(_crossVel);
+      player.state.heading -= st.space.yaw;
+      avatar.group.parent?.remove(avatar.group);
+      st.mount.yawPivot.add(avatar.group);
+      grace = GRACE;
+      return;
     }
   }
 
-  // Are we standing at a set of controls? Only ever asked inside a gunhouse.
+  // Are we standing at a set of controls?
+  //
+  // Two places to look, because there are two kinds of room: the gunhouse you
+  // have been handed into, or — if you are still on the ship's own frame — any
+  // working chamber whose gear you have walked up to. Both measure a distance in
+  // the space the body is actually in, which is the only reason this is two
+  // lines rather than a transform.
   function findControls() {
-    if (!inside || laying) return null;
-    return player.position.distanceTo(inside.station) < inside.reach ? inside : null;
+    if (laying || conning) return null;
+    if (inside) {
+      return player.position.distanceTo(inside.station) < inside.reach ? inside : null;
+    }
+    for (const st of stations) {
+      if (!st.onBandstand || !st.alive()) continue;
+      if (player.position.distanceTo(st.station) < st.reach) return st;
+    }
+    // and the wheel, which is in the ship's frame like a working chamber is
+    if (helm && helm.alive() && player.position.distanceTo(helm.station) < helm.reach) return helm;
+    return null;
   }
 
   // --- mode ------------------------------------------------------------------
@@ -227,6 +325,7 @@ export function createFirstPerson({
   function exit() {
     if (!active) return;
     leaveGun();
+    leaveWheel();
     active = false;
     input.disable();
     controls.enabled = true;
@@ -238,6 +337,69 @@ export function createFirstPerson({
   }
 
   const toggle = () => (active ? exit() : enter());
+
+  // --- straight to a gun -------------------------------------------------------
+  //
+  // Walking to a turret, finding the way in and getting to the gear is most of a
+  // minute, and when you are trying to see whether the sight is drawn right you
+  // want to be looking through it. This puts you at one, and pressing it again
+  // moves you to the next — which is also the quickest way to check that all four
+  // are actually reachable and actually lay.
+  let nextStation = 0;
+
+  function goToStation(st) {
+    if (!st || !st.alive()) return false;
+    if (!active) enter();
+    leaveGun();
+    leaveWheel();
+    avatar.group.parent?.remove(avatar.group);
+    if (st.onBandstand) {
+      // its room is part of the ship, so there is no space to be handed into
+      inside = null;
+      player.rehome(shipSpace, access);
+      body.group.add(avatar.group);
+    } else {
+      inside = st;
+      player.rehome(st.space, null);
+      st.mount.yawPivot.add(avatar.group);
+    }
+    player.teleport(st.approach, st.approachHeading);
+    grace = GRACE;
+    near = st;
+    takeGun(st);
+    return true;
+  }
+
+  // Round the battery, skipping anything that has been shot away.
+  function nextGun() {
+    for (let i = 0; i < stations.length; i++) {
+      const st = stations[(nextStation + i) % stations.length];
+      if (goToStation(st)) {
+        nextStation = (nextStation + i + 1) % stations.length;
+        return st;
+      }
+    }
+    return null;
+  }
+
+  // Straight to the wheel, for the same reason `nextGun` exists: the climb to the
+  // bridge is a minute of ladders, and when what you want to see is whether the
+  // wheelhouse looks right from the wheel you should be at the wheel.
+  function goToHelm() {
+    if (!helm || !helm.alive()) return false;
+    if (!active) enter();
+    leaveGun();
+    avatar.group.parent?.remove(avatar.group);
+    inside = null;
+    player.rehome(shipSpace, access);
+    body.group.add(avatar.group);
+    player.teleport(helm.approach, helm.approachHeading);
+    player.state.pitch = 0;
+    grace = GRACE;
+    near = helm;
+    takeHelm();
+    return true;
+  }
 
   function feel(dt) {
     const speed = player.state.grounded ? player.speed : 0;
@@ -277,11 +439,41 @@ export function createFirstPerson({
   // restarts every time you go aboard.
   function update(dt, now) {
     shipSpace.syncHull(dt);
+
+    // Order matters here, and it is the difference between a sight that answers
+    // the mouse and one that answers it a frame late: take the mouse, let the
+    // mounts run on it, and only *then* work out where the gunhouses ended up.
+    // Reading the frames the other way round shows you last frame's bearing
+    // through this frame's sight, which at x36 is a visible stutter.
+    const look = active ? input.consumeLook() : null;
+    if (laying && look) {
+      // The mouse moves the *demand*, not the guns; the mount's own gear decides
+      // what to do about it and takes its time. `look` arrives already
+      // multiplied by the walking sensitivity, so that is divided back out.
+      //
+      // Scaled by the square root of the field, not the field itself: linear
+      // scaling makes a x36 sight so slow you cannot traverse in it at all,
+      // while no scaling makes it uncontrollable. The root splits the
+      // difference — fine laying stays fine, and you can still get the mount
+      // moving.
+      const perPixel = LAYING.sensitivity * Math.sqrt(LAYING.fov[mag] / LAYING.fov[0]);
+      // The demand is a bearing and an elevation in the *world*, so a hand held
+      // still holds the sight still however she rolls. Signs match the walking
+      // camera exactly — mouse right trains to starboard, mouse up elevates —
+      // which they did not before, and a sight that goes down when you push the
+      // mouse up is unusable however good the rest of it is.
+      laying.lay.demandBearing += (look.yaw / PLAYER.sensitivity) * perPixel;
+      laying.lay.demandPitch += (look.pitch / PLAYER.sensitivity) * perPixel;
+    }
+    for (const st of stations) st.step(dt);
     for (const st of stations) {
       st.space.syncHull(dt);
       st.space.refresh();
-      st.step(dt);
     }
+    // The wheel and the telegraph lever turn whether or not anybody is holding
+    // them, because they show what the ship has been told and she can be told it
+    // from the sea view as well as from the bridge.
+    if (helm) helm.step(dt);
 
     if (!active) {
       player.step(dt, IDLE, now);
@@ -290,21 +482,13 @@ export function createFirstPerson({
       return;
     }
 
-    const look = input.consumeLook();
     if (laying) {
-      // The mouse moves the *demand*, not the guns. What the guns do about it is
-      // the mount's business, and it takes its time. `look` arrives already
-      // multiplied by the walking sensitivity, so it is divided back out: a
-      // pixel of mouse should be the same angle *on the target* at any
-      // magnification, which is the only thing that makes a x36 sight usable.
-      const perPixel = LAYING.sensitivity * (LAYING.fov[mag] / LAYING.fov[0]);
-      laying.lay.demandYaw -= (look.yaw / PLAYER.sensitivity) * perPixel;
-      laying.lay.demandElev -= (look.pitch / PLAYER.sensitivity) * perPixel;
       laying.sight(camera);
       const off = laying.demandOffset(LAYING.fov[mag]);
-      const shell = shellFor ? shellFor() : { key: '—', speed: 320 };
+      const shell = shellFor ? shellFor() : { key: '—' };
       sight.set({
-        range: laying.rangeAt(laying.mount.elev, shell.speed),
+        range: laying.rangeAt(laying.mount.elev),
+        tof: laying.flightTime(laying.mount.elev),
         turret: laying.id.replace('turret.', ''),
         shell: shell.key,
         mag,
@@ -316,11 +500,31 @@ export function createFirstPerson({
       return;
     }
 
+    // The mouse is your head, and at the wheel that is *all* it is. Heading is not
+    // wrapped or limited, so it turns the whole way round — the wheelhouse has
+    // windows on four sides and you should be able to look out of any of them
+    // without letting go.
     player.state.heading += look.yaw;
     player.state.pitch = Math.min(
       Math.max(player.state.pitch + look.pitch, -PLAYER.pitchLimit),
       PLAYER.pitchLimit,
     );
+
+    if (conning) {
+      // Standing at the wheel: the body does not step at all, exactly as it does
+      // not while laying a gun. It stays where it was put and the space carries it,
+      // so she heaves and rolls under you and the horizon moves in the windows
+      // without the legs having to be simulated to do it. WASD is hers now — see
+      // helmStation.js for why the keys go to the ship's own helm rather than
+      // through here.
+      if (!conning.alive()) leaveWheel();
+      feel(dt);
+      place();
+      avatar.group.visible = false;
+      avatar.place(player.position, player.state.heading);
+      return;
+    }
+
     player.step(dt, input.read(), now);
     crossDoors(dt);
     near = findControls();
@@ -335,6 +539,7 @@ export function createFirstPerson({
     get laying() { return laying; },
     get inside() { return inside; },
     get near() { return near; },
+    get conning() { return conning; },
     get magnification() { return LAYING.magLabels[mag]; },
     enter,
     exit,
@@ -342,6 +547,13 @@ export function createFirstPerson({
     update,
     takeGun,
     leaveGun,
+    takeControls,
+    takeHelm,
+    leaveWheel,
+    goToHelm,
+    helm,
+    goToStation,
+    nextGun,
     cycleMag,
     stations,
     stationById,

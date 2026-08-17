@@ -60,17 +60,22 @@ export function createGunsight() {
   svg.setAttribute('preserveAspectRatio', 'none');
   root.append(svg);
 
-  // The mask: black everywhere, punched through by the two eyecups. Radii are in
-  // viewport height so the sight is the same size whatever shape the window is.
+  // The mask. In an SVG mask white shows and black hides, so the rect is white —
+  // the shade is drawn *everywhere* — and the eyecups are black, which is what
+  // punches the view out of it. Getting this the wrong way round fills the
+  // eyecups with ink and leaves you looking at the deck through the surround,
+  // which is exactly as useless as it sounds.
+  // Radii are in viewport height, so the sight is the same size whatever shape
+  // the window is.
   const defs = document.createElementNS(NS, 'defs');
   const mask = document.createElementNS(NS, 'mask');
   mask.setAttribute('id', 'gs-eyecups');
   const white = document.createElementNS(NS, 'rect');
-  white.setAttribute('fill', '#000');
+  white.setAttribute('fill', '#fff');
   const holes = [];
   for (let i = 0; i < 2; i++) {
     const c = document.createElementNS(NS, 'circle');
-    c.setAttribute('fill', '#fff');
+    c.setAttribute('fill', '#000');
     holes.push(c);
   }
   mask.append(white, ...holes);
@@ -80,21 +85,67 @@ export function createGunsight() {
   shade.setAttribute('fill', '#05070a');
   shade.setAttribute('mask', 'url(#gs-eyecups)');
 
-  // A soft inner shadow round each eyecup, so the edge is rubber rather than a
-  // hole cut in card.
-  const rings = holes.map(() => {
+  // The same shape the other way round, for everything that is *engraved on the
+  // glass*: wires, ticks, the demand pip. Without it the graticule runs on past
+  // the edge of the field and out across the eyecup, which is a thing no sight
+  // has ever done — the wires are inside the tube.
+  const fieldMask = document.createElementNS(NS, 'mask');
+  fieldMask.setAttribute('id', 'gs-field');
+  const fieldRect = document.createElementNS(NS, 'rect');
+  fieldRect.setAttribute('fill', '#000');
+  const fieldHoles = [0, 1].map(() => {
     const c = document.createElementNS(NS, 'circle');
-    c.setAttribute('fill', 'none');
-    c.setAttribute('stroke', '#05070a');
-    c.setAttribute('stroke-opacity', '0.55');
+    c.setAttribute('fill', '#fff');
     return c;
+  });
+  fieldMask.append(fieldRect, ...fieldHoles);
+  defs.append(fieldMask);
+  const graticule = document.createElementNS(NS, 'g');
+  graticule.setAttribute('mask', 'url(#gs-field)');
+
+  // The rubber round the inside of the eyecups.
+  //
+  // Two full circles will not do it. Where the eyecups overlap, each one's edge
+  // runs straight across the middle of the other's field, and what you get is a
+  // pair of rings drawn over the view like a Venn diagram — which is what the
+  // sight looked like before this. What is actually wanted is the rim of the
+  // *union*: the part of each circle's edge that is outside the other one.
+  //
+  // So each rim is clipped by a mask that hides it inside its neighbour. Two
+  // masks, four lines, and the boundary comes out continuous the whole way round.
+  const rimMasks = [0, 1].map((i) => {
+    const m = document.createElementNS(NS, 'mask');
+    m.setAttribute('id', `gs-outside-${i}`);
+    const w = document.createElementNS(NS, 'rect');
+    w.setAttribute('fill', '#fff');
+    const other = document.createElementNS(NS, 'circle');
+    other.setAttribute('fill', '#000');
+    m.append(w, other);
+    defs.append(m);
+    return { mask: m, rect: w, other };
+  });
+
+  const rings = [0, 1].map((i) => {
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('mask', `url(#gs-outside-${i})`);
+    // a wide soft shadow and a hard lip inside it, which is what reads as rubber
+    const soft = document.createElementNS(NS, 'circle');
+    soft.setAttribute('fill', 'none');
+    soft.setAttribute('stroke', '#05070a');
+    soft.setAttribute('stroke-opacity', '0.30');
+    const lip = document.createElementNS(NS, 'circle');
+    lip.setAttribute('fill', 'none');
+    lip.setAttribute('stroke', '#05070a');
+    lip.setAttribute('stroke-opacity', '0.95');
+    g.append(soft, lip);
+    return { g, soft, lip };
   });
 
   const hair = ['h1', 'h2', 'v1', 'v2'].map(() => {
     const l = document.createElementNS(NS, 'line');
     l.setAttribute('stroke', '#0b0f13');
-    l.setAttribute('stroke-width', '1.6');
-    l.setAttribute('stroke-opacity', '0.85');
+    l.setAttribute('stroke-width', '1.4');
+    l.setAttribute('stroke-opacity', '0.8');
     return l;
   });
   // range ticks down the vertical wire
@@ -118,7 +169,8 @@ export function createGunsight() {
   pipDot.setAttribute('r', '1.8');
   pip.append(pipRing, pipDot);
 
-  svg.append(defs, shade, ...rings, ...hair, ...ticks, pip);
+  graticule.append(...hair, ...ticks, pip);
+  svg.append(defs, shade, ...rings.map((r) => r.g), graticule);
 
   const range = document.createElement('div');
   range.className = 'plate range';
@@ -157,16 +209,37 @@ export function createGunsight() {
     white.setAttribute('width', w); white.setAttribute('height', h);
     shade.setAttribute('x', 0); shade.setAttribute('y', 0);
     shade.setAttribute('width', w); shade.setAttribute('height', h);
+    const cx = (i) => w / 2 + (i ? gap : -gap);
     holes.forEach((c, i) => {
-      c.setAttribute('cx', w / 2 + (i ? gap : -gap));
+      c.setAttribute('cx', cx(i));
       c.setAttribute('cy', cy);
       c.setAttribute('r', r);
     });
-    rings.forEach((c, i) => {
-      c.setAttribute('cx', w / 2 + (i ? gap : -gap));
+    fieldRect.setAttribute('x', 0); fieldRect.setAttribute('y', 0);
+    fieldRect.setAttribute('width', w); fieldRect.setAttribute('height', h);
+    fieldHoles.forEach((c, i) => {
+      c.setAttribute('cx', cx(i));
       c.setAttribute('cy', cy);
-      c.setAttribute('r', r - r * 0.05);
-      c.setAttribute('stroke-width', r * 0.1);
+      c.setAttribute('r', r);
+    });
+    rimMasks.forEach((m, i) => {
+      m.rect.setAttribute('x', 0); m.rect.setAttribute('y', 0);
+      m.rect.setAttribute('width', w); m.rect.setAttribute('height', h);
+      // the *other* eyecup, pulled in a hair so the two rims meet cleanly at the
+      // cusps instead of leaving a pinhole of shade between them
+      m.other.setAttribute('cx', cx(1 - i));
+      m.other.setAttribute('cy', cy);
+      m.other.setAttribute('r', r - 1);
+    });
+    rings.forEach((ring, i) => {
+      for (const [c, inset, width] of [
+        [ring.soft, 0.055, 0.11], [ring.lip, 0.012, 0.024],
+      ]) {
+        c.setAttribute('cx', cx(i));
+        c.setAttribute('cy', cy);
+        c.setAttribute('r', r - r * inset);
+        c.setAttribute('stroke-width', r * width);
+      }
     });
     const reach = gap + r;
     const inner = r * 0.05;

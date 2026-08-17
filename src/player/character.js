@@ -65,6 +65,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     jumpWanted: 0, // seconds a pressed jump stays remembered for
     knockdownUntil: 0,
     fly: false,
+    climbing: false, // on a ladder's rungs: neither on a deck nor falling off one
     overboard: 0, // times she has put us in the sea
   };
 
@@ -75,7 +76,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   // so the ship's normal has to be saved before the ladders can overwrite it.
   function solidAt(x, y, z) {
     _p.set(x, y, z);
-    const d = colliders.query(_p, _hit);
+    const d = colliders.query(_p, _hit, null, space.skipShapes ?? null);
     if (!extra) return d;
     const nx = _hit.normal.x; const ny = _hit.normal.y; const nz = _hit.normal.z;
     const id = _hit.id;
@@ -87,6 +88,35 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   }
 
   const inside = (x, y, z) => solidAt(x, y, z) > 0;
+
+  // --- ladders ----------------------------------------------------------------
+  //
+  // The one place on this ship where the collision field is not the whole answer.
+  // Every other way up is a flight of invisible treads and needs no code at all —
+  // the floor probe simply finds the next one (see deckAccess.js) — but a flight is
+  // a 35-degree ramp, and the climb from the weather deck to the air-defence
+  // platform is eleven metres in a trunk two metres square. That is a ladder, and a
+  // ladder is vertical.
+  //
+  // So a ladder is a volume, and inside it forward and back are up and down. It is
+  // stated where the trunk is built (battleship/bridgeAccess.js) and arrives here
+  // through the same `extra` the ladders and deck props do, which means a body
+  // handed into a gunhouse — where `extra` is null — cannot be on one.
+  //
+  // `exit` is which way you step off at the head. Without it, arriving at the top
+  // leaves you standing over the hole you came up, and the floor probe quite
+  // correctly drops you back down it.
+  function ladderAt(x, y, z) {
+    const list = extra && extra.ladders;
+    if (!list) return null;
+    for (const L of list) {
+      if (Math.abs(x - L.c.x) > L.h.x) continue;
+      if (Math.abs(z - L.c.z) > L.h.z) continue;
+      if (y < L.bottom - 0.1 || y > L.top + 0.4) continue;
+      return L;
+    }
+    return null;
+  }
 
   function bisect(x, z, yIn, yOut) {
     let lo = yIn; let hi = yOut;
@@ -212,6 +242,37 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
       vel.set(_want.x * 2.5, (lift + input.rise * 8) * 1.2, _want.z * 2.5);
       pos.addScaledVector(vel, dt);
       state.grounded = false;
+      return;
+    }
+
+    // --- on a ladder ----------------------------------------------------------
+    //
+    // Only once you have asked to be: standing at the foot of one with the feet on
+    // the deck, forward still walks, so you can go back down the passage you came
+    // up. Off the deck inside the trunk you are on it whatever you press, which is
+    // what stops a released key dropping you eleven metres.
+    const ladder = ladderAt(pos.x, pos.y, pos.z);
+    state.climbing = false;
+    if (ladder && !knocked && (!state.grounded || input.forward > 0)) {
+      state.climbing = true;
+      const atTop = pos.y >= ladder.top - 0.02;
+      vel.set(0, atTop ? 0 : input.forward * PLAYER.climb, 0);
+      // Strafe still works, at a shuffle: it is how you get off at the bottom
+      // without having to walk backwards down a passage you cannot see.
+      const side = 0.45;
+      vel.x = -cos * input.strafe * PLAYER.walk * side;
+      vel.z = sin * input.strafe * PLAYER.walk * side;
+      pos.y = Math.min(Math.max(pos.y + vel.y * dt, ladder.bottom), ladder.top);
+      pos.x += vel.x * dt;
+      pos.z += vel.z * dt;
+      // At the head, forward walks you off it — the one bit of the climb the
+      // player should not have to think about, because the alternative is standing
+      // on the hatch wondering why the deck is not holding you up.
+      if (atTop && input.forward > 0) pos.addScaledVector(ladder.exit, PLAYER.walk * 0.7 * dt);
+      resolveWalls();
+      state.grounded = false;
+      state.standingOn = 'a ladder';
+      state.coyote = 0;
       return;
     }
 

@@ -2,7 +2,7 @@ import { MeshBasicNodeMaterial, DoubleSide, Matrix4, Vector4 } from 'three/webgp
 import {
   Fn, vec2, vec3, vec4, float, normalize, dot, max, saturate, pow, mix, reflect, abs,
   smoothstep, cameraPosition, positionWorld, positionLocal, normalWorld, attribute,
-  fract, floor, hash, fwidth, normalLocal, step, min, length,
+  fract, floor, hash, fwidth, normalLocal, step, min, length, inverseSqrt, sqrt,
   uniform, texture3D, Loop, If, Discard,
 } from 'three/tsl';
 import { skyColor } from '../ocean/sky.js';
@@ -49,9 +49,26 @@ export function createBoatMaterial({
   planks = 0, weather = 0, grain = 0.04, plating = null,
   damage = null, waterlinePaint = null, glass = null, destruction = null, interior = false,
   metalness = 0, anisotropy = 0.6, dispersion = 0.1, metalColor = [0.56, 0.57, 0.58],
+  // How thick the plating reads — how far off its own surface the backing has
+  // to look to find the edge of the hole it is showing through. Passed in
+  // rather than imported: this material is the launch's as well as the ship's,
+  // and it has no business knowing about the battleship's hull module.
+  platingDepth = 0.7,
   // The colour of the room behind a lit scuttle. See the lamp section below;
   // which scuttles are lit and how brightly is carried in the geometry.
   scuttleLamp = null,
+  // The other lamp colour. Which of the two a pane burns is one bit of its
+  // paintMask, so a red battle light and a warm cabin light share one program
+  // and one term.
+  battleLamp = null,
+  // and the third: the tungsten yellow over a turret door
+  doorLamp = null,
+  // { count, pos, col } — the emitter rig that throws light back onto her. See
+  // `lamps` in battleship/shipMaterial.js for how it is filled.
+  lamps = null,
+  // { count, on, pos, col } — the same again for her guns, which are lights for
+  // a tenth of a second at a time. See the block at the foot of the shader.
+  flashes = null,
 }) {
   const mat = new MeshBasicNodeMaterial();
 
@@ -85,18 +102,26 @@ export function createBoatMaterial({
     // per-vertex so the liner meshes can share this program; see interior.js.
     const inside = (interior ? attribute('inside', 'float') : float(0)).toVar();
 
-    if (destruction !== null) {
-      const D = destruction;
-      // Per-object, and *constant*: where this mesh's vertices land in the
-      // ship's frame with every mount at rest. Constant is the entire point. A
-      // turret that trains after being holed has to carry its hole round with
-      // it, and a funnel lying across the quarterdeck has to keep the hits that
-      // felled it — neither of which is true if the lookup uses the live world
-      // transform.
-      const fieldXform = uniform(new Matrix4()).onObjectUpdate(function (frame) {
+    // Per-object, and *constant*: where this mesh's vertices land in the ship's
+    // frame with every mount at rest. Constant is the entire point. A turret
+    // that trains after being holed has to carry its hole round with it, and a
+    // funnel lying across the quarterdeck has to keep the hits that felled it —
+    // neither of which is true if the lookup uses the live world transform.
+    //
+    // Two things want it: the damage field, and the lamps. Both are volumes
+    // written in her frame rather than properties of any mesh, so both need the
+    // same answer to the same question — where in the ship am I? — and asking it
+    // twice would be two matrices and two multiplies for one number.
+    const shipXform = (destruction !== null || lamps !== null || flashes !== null)
+      ? uniform(new Matrix4()).onObjectUpdate(function (frame) {
         const m = frame.object.userData.fieldXform;
         if (m) this.value.copy(m); else this.value.identity();
-      });
+      })
+      : null;
+
+    if (destruction !== null) {
+      const D = destruction;
+      const fieldXform = shipXform;
       // The plane a piece was torn off along: discard where dot(n, p) > d. A
       // zero normal means this object is whole.
       const cutPlane = uniform(new Vector4()).onObjectUpdate(function (frame) {
@@ -163,6 +188,7 @@ export function createBoatMaterial({
         const thr = float(0.5).add(nz.sub(0.5).mul(0.30)).add(inside.mul(10)).toVar();
         Discard(rem.greaterThan(thr));
         rimT.assign(max(rimT, smoothstep(thr.sub(0.26), thr, rem)));
+
         scorchT.assign(f.g);
         heatT.assign(f.b.mul(smoothstep(float(0.15), float(0.75), rem)));
       });
@@ -557,9 +583,9 @@ export function createBoatMaterial({
       // the rim of every hole is already shaded as — sitting in a shallow recess
       // and therefore a little shadowed, and nothing more. The frames read as
       // faint relief across it rather than as decks.
-      const raw = vec3(0.30, 0.295, 0.283).mul(float(1).sub(ribs.mul(0.22)));
+      const raw = vec3(0.20, 0.196, 0.185).mul(float(1).sub(ribs.mul(0.42)));
       base.assign(mix(base, raw, inside));
-      gloss.assign(mix(gloss, float(0.30), inside));
+      gloss.assign(mix(gloss, float(0.12), inside));
     }
     // --- direct sun, cut by the shadow map ---
     const ndl = saturate(dot(N, shading.sunDir));
@@ -595,7 +621,22 @@ export function createBoatMaterial({
     const shadeAmb = sunShadow.mul(0.28).add(0.72);
     const skyDir = grey(mix(shading.horizon, skyRaw, 0.35), 0.55);
     const skyFlat = grey(shading.horizon, 0.55);
-    const sky = mix(skyFlat, skyDir, fx.hullSkyFill.u).mul(0.78).mul(shadeAmb);
+    // Starlight, and the moon when there is one.
+    //
+    // The two fills above are both the sky, and after dark the sky is nearly
+    // black — so every surface on the ship fell to within a couple of counts of
+    // zero and the deck stopped being a deck. That matters more than it sounds:
+    // the plank seams are the one thing on her that says how big she is, and a
+    // teak deck you cannot read the planks of is a dark floor.
+    //
+    // So there is a floor under the ambient at night, and it is cool on purpose.
+    // The lamps are the warm light and they are local; this is the light that is
+    // simply *around*, and if it were neutral the ship would read as underlit
+    // daylight rather than as night. Small enough that the lit windows are still
+    // far and away the brightest thing aboard.
+    const nightFill = vec3(0.105, 0.125, 0.170).mul(shading.night);
+    const sky = mix(skyFlat, skyDir, fx.hullSkyFill.u).mul(0.78).mul(shadeAmb)
+      .add(nightFill);
     const bounceCol = grey(mix(shading.deepColor, shading.scatterColor, 0.35), 0.5);
     const bounce = bounceCol
       .mul(mix(float(0.2), saturate(N.y.negate()).mul(0.45).add(0.12), fx.hullBounce.u))
@@ -639,8 +680,8 @@ export function createBoatMaterial({
       metal.assign(mix(metal, float(1.0), torn));
     }
     if (interior) {
-      // torn plate: no paint on it anywhere, and it answers as the steel it is
-      metal.assign(mix(metal, float(0.8), inside));
+      // nothing inside her is polished, and nothing inside her is painted
+      metal.assign(mix(metal, float(0.35), inside));
     }
 
     const alpha = rough.mul(rough).toVar();
@@ -659,10 +700,10 @@ export function createBoatMaterial({
     // recess faces every which way, so without a term that does not care about
     // the normal there is always some facet of it that comes out black — and one
     // black facet is all it takes to read as a hole again.
-    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.45))) : sun;
-    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.15))) : sky;
+    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.90))) : sun;
+    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.35))) : sky;
     const fill = interior
-      ? grey(shading.horizon, 0.6).mul(inside.mul(0.45))
+      ? grey(shading.horizon, 0.7).mul(inside.mul(0.30))
       : vec3(0);
     const lit = albedo.mul(litSun.add(litSky).add(bounce).add(fill)).toVar();
 
@@ -820,11 +861,209 @@ export function createBoatMaterial({
     // worse than no porthole lit at all.
     if (scuttleLamp !== null) {
       const lampFlags = attribute('paintMask', 'float').toVar();
-      const level = floor(lampFlags.mul(0.25)).div(15);
+      // four bits of level, then one bit saying which colour is in the holder
+      const level = floor(lampFlags.mul(0.25)).sub(floor(lampFlags.div(64)).mul(16)).div(15);
+      // two bits of colour above the level: 0 warm, 1 red, 2 white
+      const red = floor(lampFlags.div(64)).sub(floor(lampFlags.div(128)).mul(2));
+      const white = floor(lampFlags.div(128)).sub(floor(lampFlags.div(256)).mul(2));
+      let lampCol = vec3(...scuttleLamp);
+      if (battleLamp !== null) lampCol = mix(lampCol, vec3(...battleLamp), red);
+      if (doorLamp !== null) lampCol = mix(lampCol, vec3(...doorLamp), white);
       const night = shading.night;
-      lit.addAssign(vec3(...scuttleLamp)
+      lit.addAssign(lampCol
         .mul(level)
         .mul(float(0.04).add(night.mul(2.1))));
+    }
+
+    // --- what the lamps land on -------------------------------------------------
+    //
+    // A lit window is only half of a lit window. The other half is the patch of
+    // bulkhead beside it, the rail in front of it and the strip of deck under it,
+    // and without that the ship at night is a black silhouette with glowing
+    // stickers on it — every light reads as painted on, because nothing anywhere
+    // agrees that it is there.
+    //
+    // There are no scene lights to do this. The whole ship is one hand-written
+    // node material with a sun, a sky and nothing else, so the lamps are put in
+    // by hand: a short list of emitters in her own frame, each a position, a
+    // reach and a colour, evaluated per fragment. They are *rig*, not geometry —
+    // one emitter stands for a whole run of scuttles or a whole window band,
+    // because what matters at this range is that the light comes from about
+    // there, not that it comes from each pane.
+    //
+    // Costed like a rig, too. The loop is unrolled at graph-build time, it runs
+    // over every fragment of the hull, the deck and every deckhouse, and it is
+    // gated on `night` so it costs nothing in daylight — which is most of the
+    // time, and is when the frame is already busiest.
+    if (lamps !== null) {
+      const night = shading.night;
+      const spill = vec3(0).toVar();
+      // How much of her lamplight reaches this point at all. One fetch of a grid
+      // baked in her own frame (lampVolume.js), and the reason it is a fetch
+      // rather than eight shadow maps is that nothing involved moves relative to
+      // anything else involved — the lamps are bolted to her, the cargo is
+      // lashed to her deck, and the whole assembly turns as one body.
+      //
+      // It multiplies the whole spill rather than being applied per lamp, which
+      // is the one approximation in it: two lamps overlapping, one blocked, get
+      // the weighted average instead of a clean cut. Worth knowing about; not
+      // worth eight volumes on a ship whose lamps are twenty metres apart.
+      const vis = float(1).toVar();
+      If(night.greaterThan(0.004), () => {
+        const shipP = shipXform.mul(vec4(positionLocal, 1)).xyz.toVar();
+        // the surface normal in her frame. Rotation only — w = 0 drops the
+        // translation — and renormalised, because nothing promises the transform
+        // has no scale in it.
+        const shipN = normalize(shipXform.mul(vec4(normalLocal, 0)).xyz).toVar();
+        if (lamps.volume) {
+          vis.assign(texture3D(
+            lamps.volume,
+            shipP.sub(lamps.volumeOrigin).mul(lamps.volumeInvSize),
+          ).level(0).r);
+        }
+        // One lamp, added to `spill` if it reaches this fragment at all.
+        //
+        // --- why the reach test is a branch and not a multiply ------------------
+        //
+        // A lamp past its reach contributes exactly zero: `fall` saturates to 0
+        // and the cube of 0 is 0. So the arithmetic below was always *correct*
+        // for a lamp on the other end of the ship — it was just being done, in
+        // full, on every fragment, for every lamp, to arrive at nothing. Twenty
+        // lamps unrolled over a ship that fills the screen, and at any one point
+        // on her one or two of them are lit and the rest are tens of metres away.
+        //
+        // Branching on it is exact rather than approximate — the skipped term is
+        // zero, not nearly zero — and it is cheap in the way that matters on a
+        // GPU: lamps are local to the thing they are bolted to, so neighbouring
+        // fragments agree about which lamps are near them and the whole warp
+        // takes the same side of the test.
+        //
+        // The test itself avoids the square root: inside the reach means
+        // (dist/reach)^2 < 1, and `P.w` already holds 1/reach — see `write` in
+        // shipMaterial.js — so it is two multiplies and a compare.
+        const oneLamp = (i, scale = null) => {
+          const P = lamps.pos.element(i);
+          const toL = P.xyz.sub(shipP).toVar();
+          const d2 = dot(toL, toL).toVar();
+          const k = d2.mul(P.w).mul(P.w).toVar(); // (dist / reach)^2
+          If(k.lessThan(1), () => {
+            // Inverse-square is the honest falloff and the wrong one here: it has
+            // no end, so every lamp lights every fragment a little and the far
+            // side of the ship comes up in a wash. A reach that actually reaches
+            // zero is what keeps a lamp local to the thing it is standing on.
+            //
+            // No `saturate`: inside the branch k is in [0, 1), so `fall` is
+            // already in (0, 1].
+            const fall = float(1).sub(sqrt(k)).toVar();
+            // Cubed, not squared. The square reaches too far too strongly: a lamp
+            // inside a house lit every plate of the tower it was in, which put the
+            // whole pagoda up as one warm mass and lost the thing the light was
+            // there to show — that this level has people in it and the one above
+            // does not. The cube keeps a bright core and a short tail, which is
+            // what a cabin light on a bulkhead actually looks like.
+            const drop = fall.mul(fall).mul(fall);
+            // Wrapped Lambert, but only just. A surface turned away from a light
+            // is not black — there is no bounce pass here to say what it does
+            // catch — but the floor has to stay small, because a lamp in the
+            // middle of a deckhouse is surrounded by faces pointing away from it
+            // and every one of them gets the floor.
+            const invD = inverseSqrt(max(d2, float(1e-8)));
+            const wrap = saturate(dot(shipN, toL.mul(invD))).mul(0.88).add(0.12);
+            const c = lamps.col.element(i).mul(drop).mul(wrap);
+            spill.addAssign(scale === null ? c : c.mul(scale));
+          });
+        };
+
+        // --- the lamps out in the weather ---------------------------------------
+        //
+        // Nothing shuts these in, so there is no box to test and no slot in the
+        // array that is not a lamp: `layout.open` is how many there actually are.
+        // See the note on `layout` in shipMaterial.js for why the rig is sorted.
+        const L = lamps.layout;
+        for (let i = 0; i < L.open; i++) oneLamp(i);
+
+        // --- and the ones shut in a room ----------------------------------------
+        //
+        // The red battle lights inside the turrets. The shadow volume cannot help
+        // them: that grid is half a metre to a side and a gunhouse wall is two
+        // hundred millimetres, so the trilinear fetch that makes its shadows soft
+        // carries "lit" straight through the plating and the red comes out on the
+        // *outside* of the bandstand as a glow on the paint. A light sealed in a
+        // steel room does not want a soft edge, it wants the wall. This is the
+        // wall.
+        //
+        // The box is tested once for the room and not once for each lamp in it,
+        // and — this is the part that matters for the frame rate — the lamps
+        // inside it are not evaluated at all unless the fragment is in the room.
+        // Twelve of the twenty lamps on this ship are in one of four gunhouses,
+        // and every fragment of her hull, her masts and her upperworks was
+        // evaluating all twelve before multiplying them by zero.
+        for (const room of L.rooms) {
+          const H = lamps.roomHalf.element(room.slot);
+          const C = lamps.pos.element(room.from); // the room's centre, in her frame
+          // How far inside the box this fragment is, along whichever axis it is
+          // nearest the wall on. Negative outside, and the whole room is skipped.
+          const edge = min(
+            min(H.x.sub(abs(shipP.x)), H.y.sub(abs(shipP.y.sub(C.y)))),
+            H.z.sub(abs(shipP.z.sub(C.z))),
+          ).toVar();
+          If(edge.greaterThan(0), () => {
+            // The edge is just soft enough not to alias — a sixth of a metre —
+            // and outside it the lamp contributes exactly nothing, which is what
+            // being inside a turret means.
+            const soft = saturate(edge.mul(6)).toVar();
+            for (let i = room.from; i < room.to; i++) oneLamp(i, soft);
+          });
+        }
+      });
+      lit.addAssign(spill.mul(vis).mul(night));
+    }
+
+    // --- and when a gun goes off ------------------------------------------------
+    //
+    // A muzzle flash is a lamp, and it is a lamp that breaks every rule the ones
+    // above are written to: it lasts a tenth of a second, it is somewhere new
+    // each time, it is a hundred times brighter than everything else on the ship
+    // together, and it is plainly visible in daylight — so it is neither gated on
+    // night nor multiplied by the baked shadow volume, which was baked for lights
+    // that are bolted to her and knows nothing about a gun.
+    //
+    // Every fragment of the ship pays for it, which is why the whole thing sits
+    // inside one branch on a scalar that is zero except in the tenth of a second
+    // after a salvo. Nothing is firing on almost every frame of the game, and on
+    // those frames this block is a compare.
+    //
+    // One approximation, worth naming: `shipXform` is the *rest* pose — see the
+    // note where it is built — so a trained turret's own plating is lit as though
+    // it were still fore-and-aft. On the deck, the hull and the upperworks, which
+    // is where you actually watch a flash land, it is exact; on the gunhouse the
+    // flash is going off two metres away and is white anyway.
+    if (flashes !== null) {
+      If(flashes.on.greaterThan(0), () => {
+        const shipP = shipXform.mul(vec4(positionLocal, 1)).xyz.toVar();
+        const shipN = normalize(shipXform.mul(vec4(normalLocal, 0)).xyz).toVar();
+        const blast = vec3(0).toVar();
+        for (let i = 0; i < flashes.count; i++) {
+          const P = flashes.pos.element(i);
+          const toL = P.xyz.sub(shipP).toVar();
+          const d2 = dot(toL, toL).toVar();
+          const k = d2.mul(P.w).mul(P.w).toVar(); // (dist / reach)^2
+          If(k.lessThan(1), () => {
+            // Squared rather than cubed, unlike the lamps: a cabin light wants a
+            // bright core and a short tail, and a muzzle flash wants to reach the
+            // far end of the forecastle — because it does.
+            const fall = float(1).sub(sqrt(k)).toVar();
+            const drop = fall.mul(fall);
+            const invD = inverseSqrt(max(d2, float(1e-8)));
+            // A high floor on the wrap: this much light in the open air bounces
+            // off the deck and the sea and comes back at everything, and a face
+            // turned away from a gun going off next to it is not black.
+            const wrap = saturate(dot(shipN, toL.mul(invD))).mul(0.68).add(0.32);
+            blast.addAssign(flashes.col.element(i).mul(drop).mul(wrap));
+          });
+        }
+        lit.addAssign(blast);
+      });
     }
 
     // --- still hot ---------------------------------------------------------

@@ -18,7 +18,7 @@ import { PLAYER } from './spec.js';
 const KHAKI = [0.36, 0.33, 0.25];
 const SKIN = [0.52, 0.40, 0.31];
 
-export function createAvatar({ materials }) {
+export function createAvatar({ materials, castLayer = 1 }) {
   const group = new Group();
   const slot = materials.slotOf('crew');
 
@@ -43,6 +43,15 @@ export function createAvatar({ materials }) {
   head.position.z = 0.02;
 
   group.add(body, head);
+  // She throws a shadow on the deck she is standing on, which is the cheapest
+  // thing there is for grounding a figure — without it a person in first or
+  // third person reads as hovering a few centimetres above the teak. `castLayer`
+  // is the disjoint-caster layer the deck's shadow map is culled against; see
+  // the note beside `deckShadow` in main.js.
+  for (const m of [body, head]) {
+    m.castShadow = true;
+    m.layers.enable(castLayer);
+  }
 
   // `pos` is the feet in ship-local space, `heading` radians about local up —
   // 0 faces the bow, which is the way the head is offset.

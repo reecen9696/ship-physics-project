@@ -7,14 +7,18 @@ import { PLAYER, GRAVITY } from './src/player/spec.js';
 import { hullDescriptor, deckY, zOf } from './src/battleship/hull.js';
 import {
   HOUSE, createHouseColliders, insideDoorVolumes, entryVolumes, landing,
+  chamber, chamberStation, BANDSTAND_DOOR_H,
 } from './src/battleship/turretHouse.js';
+import { checkSuperfiringClearance } from './src/battleship/hull.js';
+import { TURRET_SPEC } from './src/battleship/spec.js';
 import { TURRETS } from './src/battleship/spec.js';
 
 const D = HOUSE.door;
 console.log('--- clearances ---');
 console.log(`  player            ${PLAYER.height.toFixed(2)} m tall, ${(PLAYER.radius*2).toFixed(2)} m across`);
 console.log(`  gunhouse door     ${(D.head - D.sill).toFixed(2)} m clear, ${(D.halfLen*2).toFixed(2)} m wide, sill ${D.sill.toFixed(2)} m`);
-console.log(`  bandstand passage 2.10 m clear`);
+console.log(`  bandstand passage ${(BANDSTAND_DOOR_H - 0.1).toFixed(2)} m clear, `
+  + `${(D.halfLen * 2).toFixed(2)} m wide`);
 console.log(`  room headroom     ${(HOUSE.ceiling - HOUSE.floor).toFixed(2)} m`);
 console.log(`  room              ${(HOUSE.halfW*2).toFixed(1)} x ${(HOUSE.fwd-HOUSE.aft).toFixed(1)} m`);
 const bad = [];
@@ -22,7 +26,13 @@ if (D.head - D.sill < PLAYER.height + 0.15) bad.push('gunhouse door is too low')
 if (D.halfLen * 2 < PLAYER.radius * 2 + 0.3) bad.push('gunhouse door is too narrow');
 if (D.sill - HOUSE.floor > PLAYER.stepUp) bad.push('door sill is too high to step over');
 if (HOUSE.ceiling - HOUSE.floor < PLAYER.height + 0.3) bad.push('room headroom is too low');
+if (BANDSTAND_DOOR_H - 0.1 < PLAYER.height + 0.2) bad.push('bandstand passage is too low');
 console.log(bad.length ? '  FAIL: ' + bad.join('; ') : '  all clear');
+try {
+  for (const r of checkSuperfiringClearance(TURRETS, TURRET_SPEC)) {
+    console.log(`  ${r.turret} clears ${r.over} by ${r.clearance.toFixed(2)} m at full depression`);
+  }
+} catch (e) { console.log('  SUPERFIRING FAIL: ' + e.message); }
 
 // walk about inside one
 const house = createHouseColliders();
@@ -107,4 +117,37 @@ for (const t2 of TURRETS) {
   console.log(`  ${t2.id.padEnd(9)} ${t2.bandstand ? 'bandstand passage' : 'gunhouse door    '} `
     + `sill ${v.sill.toFixed(2)} m · start ${start.x.toFixed(1)},${start.z.toFixed(1)} · `
     + (hit ? `WALKED IN after ${s.toFixed(1)} s` : `did not reach it (stopped at x ${q.position.x.toFixed(2)} y ${q.position.y.toFixed(2)})`));
+}
+
+
+// --- the working chambers, which are just rooms on the ship -------------------
+console.log('\n--- bandstand working chambers (no transition: you walk in) ---');
+for (const t2 of TURRETS) {
+  if (!t2.bandstand) continue;
+  const c = chamber(t2);
+  const st = chamberStation(t2);
+  const vols = entryVolumes(t2, deckY, zOf);
+  const v = vols[1];
+  console.log(`  ${t2.id}: room ${(c.halfX*2).toFixed(1)} x ${(c.halfZ*2).toFixed(1)} m, `
+    + `headroom ${(c.ceiling - c.floor).toFixed(2)} m, trunk r ${c.trunkR}, `
+    + `passage ${(BANDSTAND_DOOR_H - 0.1).toFixed(2)} m clear`);
+  if (c.ceiling - c.floor < PLAYER.height + 0.3) console.log('    FAIL: headroom');
+  // walk in from the deck and on to the gear
+  const start = new Vector3(Math.sign(v.c.x) * (c.outerX + 2.6), v.sill + 3, v.c.z);
+  const q = createCharacter({ space: ship, extra: access, spawn: { position: start, heading: 0 } });
+  const walk = { forward: 1, strafe: 0, jump: false, sprint: false, rise: 0 };
+  let s2 = 0; let best = 999;
+  q.state.heading = Math.atan2(-Math.sign(v.c.x), 0);
+  for (let i = 0; i < 180; i++) { q.step(dt, walk, s2*1000); s2 += dt; }
+  const gotIn = Math.abs(q.position.x) < c.halfX && Math.abs(q.position.z - c.origin[2]) < c.halfZ;
+  void 0;
+  console.log(`    walked in: ${gotIn ? 'yes' : 'NO'} — at x ${q.position.x.toFixed(2)} y ${q.position.y.toFixed(2)} z ${q.position.z.toFixed(2)} on ${q.state.standingOn}`);
+  // now to the gear
+  for (let i = 0; i < 300; i++) {
+    q.state.heading = Math.atan2(st.x - q.position.x, st.z - q.position.z);
+    q.step(dt, walk, s2*1000); s2 += dt;
+    best = Math.min(best, q.position.distanceTo(st));
+    if (best < 1.8) break;
+  }
+  console.log(`    got to the gear: ${best.toFixed(2)} m off (reach 1.9) -> ${best < 1.9 ? 'CAN take the gun' : 'CANNOT'}`);
 }

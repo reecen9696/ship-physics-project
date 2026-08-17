@@ -6,7 +6,8 @@
 // down here now, so they get to be plain buttons rather than another panel.
 
 export function createNavButtons({
-  onChangeBoat, onGoAboard = null, testDestructionHref = '/test-destruction/',
+  onChangeBoat, onGoAboard = null, onTestCannons = null, onFrontCannon = null,
+  onTakeHelm = null, testDestructionHref = '/test-destruction/',
 }) {
   const root = document.createElement('div');
   root.id = 'navbtns';
@@ -29,6 +30,21 @@ export function createNavButtons({
   if (onGoAboard) {
     const aboard = btn('Go aboard', () => onGoAboard());
     aboard.title = 'Stand on the battleship\'s deck (V)';
+  }
+
+  if (onTakeHelm) {
+    const wheel = btn('Take the helm', () => onTakeHelm());
+    wheel.title = 'Straight to the wheelhouse, hands on the wheel (H)';
+  }
+
+  if (onFrontCannon) {
+    const front = btn('Front cannon', () => onFrontCannon());
+    front.title = 'Straight to A turret\'s gear, hands on the gun';
+  }
+
+  if (onTestCannons) {
+    const guns = btn('Test cannons', () => onTestCannons());
+    guns.title = 'Take the gun in the next turret (T) — press again for the next one';
   }
 
   document.body.append(root);

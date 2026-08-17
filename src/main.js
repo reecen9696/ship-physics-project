@@ -3,7 +3,8 @@ import {
   FogExp2, MathUtils, DirectionalLight, PCFSoftShadowMap, NeutralToneMapping, Raycaster,
   Quaternion,
 } from 'three/webgpu';
-import { uniform, shadow } from 'three/tsl';
+import { shadow } from 'three/tsl';
+import { uniform } from './scene/uniforms.js';
 import { createShading, applyTimeOfDay, updateSunDir } from './scene/shading.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import WebGPU from 'three/addons/capabilities/WebGPU.js';
@@ -25,7 +26,7 @@ import { createHullDamage } from './boat/hullDamage.js';
 import { hullQuery } from './boat/hullShape.js';
 import { createBattleship } from './battleship/Battleship.js';
 import { createColliders } from './battleship/colliders.js';
-import { createGunnery, aimWithDrop, SHELL_TYPES } from './battleship/gunnery.js';
+import { createGunnery, aimAt, SHELL } from './battleship/gunnery.js';
 import { createHitMap } from './battleship/hitmap.js';
 import { SHIP_CONFIG, TURRETS } from './battleship/spec.js';
 import { createCameraCollision } from './scene/cameraCollision.js';
@@ -139,12 +140,82 @@ async function main() {
   // mesh casting into the map and sampling it in the main pass is fine.
   const sunShadow = shadow(sunLight);
 
+  // --- and a second map, for what is standing on her deck ----------------------
+  //
+  // The ship casts into the map above and does not sample it, for the reason
+  // written against `createBattleship` below: in this three build a mesh that
+  // writes a shadow map and whose material also reads it trips a WebGPU
+  // validation error, because the depth texture is still bound as the render
+  // attachment. The note there says the fix is to make the casters and the
+  // samplers disjoint sets. This is that.
+  //
+  // The split is one rule and it is drawn in Battleship.js: everything that
+  // *stands on* the deck casts — the superstructure, the turrets, the vents and
+  // drums and crates, the guardrail, the man walking about — and the teak deck
+  // itself receives. Nothing is on both sides of it, so nothing reads a map it
+  // wrote. It is enforced by layer: this camera is set to CAST_LAYER and three
+  // culls the shadow pass against it (see `shadow.camera.layers.mask` in
+  // ShadowNode), so the deck is not merely told not to cast — it is not drawn
+  // into the map at all.
+  //
+  // A second 4096 map is not free, and it buys the one thing the first cannot:
+  // the sun's map has to hold a whole 180 m hull *and* the sea round it, which
+  // is far too coarse to resolve a crate. This one holds the ship and nothing
+  // else.
+  const CAST_LAYER = 1;
+  const deckLight = new DirectionalLight(new Color(c.sun), 0);
+  deckLight.castShadow = true;
+  // 2048, not 4096. The map holds the ship and nothing else, so a 200 m span
+  // across 2048 texels is about 10 cm — a crate's shadow is nine texels wide,
+  // which is enough. The larger map cost several frames a second in first
+  // person for a sharpness nobody standing on the deck can see.
+  deckLight.shadow.mapSize.set(2048, 2048);
+  deckLight.shadow.bias = -0.0004;
+  deckLight.shadow.camera.layers.set(CAST_LAYER);
+  {
+    const span = 100; // she is 180 m long, and this has to hold her at any heading
+    const cam = deckLight.shadow.camera;
+    cam.left = -span; cam.right = span; cam.top = span; cam.bottom = -span;
+    cam.near = Math.max(SUN_DIST - span * 2.2, 1);
+    cam.far = SUN_DIST + span * 2.2;
+    deckLight.shadow.normalBias = (span * 2) / 2048 * 2.5;
+    cam.updateProjectionMatrix();
+  }
+  // Rendered on demand, not every frame.
+  //
+  // This map costs a full depth pass over the whole ship — hull, superstructure,
+  // turrets, guardrail, every crate on the deck — and it is sampled by exactly
+  // one thing, the teak deck, and only to shadow the *sun*. After dark there is
+  // no sun to shadow, so the entire pass draws a map nothing can see; that alone
+  // was most of what the night frame was paying for the lighting.
+  //
+  // In daylight it still has to follow her, but not at sixty hertz: what moves
+  // in it is her roll and her turrets, and a soft directional shadow updated
+  // every third frame is not a thing anybody can see moving late — she rolls
+  // on an eleven-second period, and twenty hertz is sixty samples of it.
+  deckLight.shadow.autoUpdate = false;
+  scene.add(deckLight, deckLight.target);
+  const deckShadow = shadow(deckLight);
+  // What the deck map is centred on. Null until she exists — `placeSun` runs
+  // once during setup, before there is a ship to follow — and her body position
+  // from then on.
+  let deckFollow = null;
+  let deckShadowFrame = 0;
+
   function placeSun(x, z) {
     // The shadow camera is small and follows the boat; the light rides above it
     // along the sun direction so the hull is always inside the map.
     sunLight.target.position.set(x, 0, z);
     sunLight.position.copy(shading.sunDir.value).multiplyScalar(SUN_DIST).add(sunLight.target.position);
     sunLight.target.updateMatrixWorld();
+    // The deck map follows the battleship rather than whichever hull is conned:
+    // it is her deck it is for, and she is where the props and the crew are.
+    deckLight.target.position.set(
+      deckFollow ? deckFollow.x : x, 0, deckFollow ? deckFollow.z : z,
+    );
+    deckLight.position.copy(shading.sunDir.value).multiplyScalar(SUN_DIST)
+      .add(deckLight.target.position);
+    deckLight.target.updateMatrixWorld();
   }
 
   function updateSun() {
@@ -274,13 +345,16 @@ async function main() {
   const shipWater = {
     height: uniform(0), slope: uniform(new Vector2()), origin: uniform(new Vector2()),
   };
-  // NOTE: the ship deliberately does *not* receive `sunShadow`. In this three
-  // build an object that casts into a shadow map and whose material also samples
-  // that map trips a WebGPU validation error — the depth texture ends up bound
-  // for reading while it is still the render attachment. The ship casts (onto
-  // the sea) but does not sample. Fixing this properly needs the casters and the
-  // samplers to be disjoint sets: see the note in README under "Shadows".
-  const battleship = createBattleship({ shading });
+  // She still does not receive `sunShadow`, and for the reason that note has
+  // always given: in this three build a mesh that casts into a map and whose
+  // material also samples that map trips a WebGPU validation error, because the
+  // depth texture is still bound as the render attachment. She casts into the
+  // sun's map, onto the sea, and reads nothing from it.
+  //
+  // `deckShadow` is the second map, and it is the disjoint-sets answer that note
+  // asked for — see where it is built above. Everything standing on her deck
+  // casts into it; the teak deck reads it; nothing does both.
+  const battleship = createBattleship({ shading, deckShadow, castLayer: CAST_LAYER });
   const ship = createBoat(renderer, {
     ocean, params, shading,
     hull: battleship.hull,
@@ -296,6 +370,7 @@ async function main() {
     handling: capitalShipHandling,
     buildMesh: () => battleship.group,
   });
+  deckFollow = ship.position; // where she actually is, each frame
   scene.add(ship.group);
   scene.add(battleship.fx.mesh);
   // Anything that has come off her — guardrail, fittings — and the water it
@@ -398,11 +473,13 @@ async function main() {
   // through. This page has no gunnery of its own and is not getting one; it has
   // the rig's, pointed by an eye on her own deck, so you can walk up to a turret
   // and open it.
-  const gunnery = createGunnery();
+  // The smoke goes to her own fire-and-smoke system, so a shell in flight leaves
+  // a trace made of the same particles her funnel and her fires are made of.
+  const gunnery = createGunnery({ shading, smoke: battleship.fx });
   scene.add(gunnery.group);
   const hitMap = createHitMap(battleship);
-  let shellType = SHELL_TYPES[1]; // HE: the loudest of the three, and the one
-  // whose damage you can see from where you are standing
+  // One shell. A turret is loaded with what the magazine sent up and the layer
+  // does not pick it in the middle of a salvo — see ballistics.js.
   const _hitDir = new Vector3();
   const _hitPoint = new Vector3();
   const _up = new Vector3(0, 1, 0);
@@ -410,7 +487,7 @@ async function main() {
   const under = (o, root) => { for (let n = o; n; n = n.parent) if (n === root) return true; return false; };
 
   function onShellHit({ point, object, shell }) {
-    const t = shell.type;
+    const t = SHELL;
     // There are two hulls in the water and either can be hit. The launch has one
     // number and a hole in her; the battleship has a component graph.
     if (under(object, boat.group)) {
@@ -456,17 +533,23 @@ async function main() {
   // metres under it.
   const _muzzle = new Vector3();
   const _aim = new Vector3();
+  const _to = new Vector3();
   const _shot = new Raycaster();
   function fireFromEye() {
     camera.getWorldDirection(_aim);
     ship.group.updateMatrixWorld(true);
     _shot.set(camera.position, _aim);
-    _shot.far = 400;
+    _shot.far = 2000;
     const seen = _shot.intersectObject(ship.group, true)[0];
-    const range = seen ? seen.distance : 200;
+    const range = seen ? seen.distance : 400;
     // clear of the near plane, and clear of the shooter's own head
     _muzzle.copy(camera.position).addScaledVector(_aim, 1.2);
-    gunnery.fire(_muzzle, aimWithDrop(_aim, range, shellType.speed, _aim), shellType);
+    // Where the crosshair is pointing, as a point in space, and then the launch
+    // angle that actually puts a shell through it — solved against the same
+    // trajectory the shell will fly, drag and all. See ballistics.js.
+    _to.copy(_aim).multiplyScalar(range).add(camera.position).sub(_muzzle);
+    aimAt(_to, _aim);
+    gunnery.fire(_muzzle, _aim);
   }
 
   // --- her own main battery, laid by hand -------------------------------------
@@ -482,21 +565,45 @@ async function main() {
   const _spin = new Quaternion();
   const _axis = new Vector3();
 
+  // Is a shell still inside the ship that fired it? Stated against her own
+  // collision bounds rather than a distance, because 45 m is clear of the bow
+  // from A turret and nowhere near it from Y.
+  const _shellLocal = new Vector3();
+  function insideShip(worldPos) {
+    _shellLocal.copy(worldPos);
+    ship.group.worldToLocal(_shellLocal);
+    const b = battleship.colliders.bounds;
+    const M = 8;
+    return _shellLocal.x > b.min.x - M && _shellLocal.x < b.max.x + M
+      && _shellLocal.y > b.min.y - M && _shellLocal.y < b.max.y + M
+      && _shellLocal.z > b.min.z - M && _shellLocal.z < b.max.z + M;
+  }
+
   function fireSalvo(station) {
     ship.group.updateMatrixWorld(true);
     const q = ship.group.quaternion;
     let abeam = 0;
     for (const g of station.mount.guns) {
-      _muz.copy(g.barrel.position).setZ(g.length);
-      g.barrel.localToWorld(_muz);
-      g.barrel.getWorldDirection(_gun);
+      // The gun going off: the flash at the muzzle, the smoke, the recoil, and
+      // the light all of that throws back on her. It hands back where the shell
+      // leaves from and along what line — see battleship/muzzleBlast.js.
+      const shot = battleship.fireGun(station.mount, g);
+      if (!shot) continue;
+      _muz.copy(shot.muzzle);
+      _gun.copy(shot.dir);
       // Dispersion. Two guns in one gunhouse are cross-coupled through the
       // structure and never land in the same place; a shared aim point with no
       // spread reads as one gun fired twice.
       _axis.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
       _spin.setFromAxisAngle(_axis, MathUtils.degToRad(LAYING.spread) * (Math.random() - 0.5) * 2);
       _gun.applyQuaternion(_spin).normalize();
-      gunnery.fire(_muz, _gun, shellType);
+      gunnery.fire(_muz, _gun, {
+        owner: ship.group,
+        clearOf: insideShip,
+        // A shell leaves a ship making twenty knots with those twenty knots
+        // already in it, which across the line of fire is metres at any range.
+        inherit: ship.velocity,
+      });
       abeam += _v3.copy(_gun).applyQuaternion(_qInv.copy(q).invert()).x;
     }
     // She feels it. Only as a roll impulse on the hull — the linear momentum of
@@ -507,9 +614,6 @@ async function main() {
     _fwd.set(0, 0, 1).applyQuaternion(q);
     ship.angVel.addScaledVector(_fwd, abeam * LAYING.recoilRoll);
     ship.velocity.addScaledVector(_gun, -LAYING.recoilSurge);
-    if (battleship.splash.mesh.visible) {
-      battleship.splash.burst(_muz, _gun, 26, 40, { spread: 0.5, size: 0.5, life: 0.7 });
-    }
   }
 
   // --- and a person, on her deck ----------------------------------------------
@@ -546,7 +650,13 @@ async function main() {
     turrets: TURRETS,
     damage: battleship.damage,
     onSalvo: fireSalvo,
-    shellFor: () => shellType,
+    shellFor: () => SHELL,
+    // And her wheelhouse: the pagoda's second level is a room with the wheel in it
+    // and clear glass all the way round, reached by the ladder trunk up her
+    // starboard side. Taking the wheel is the same gesture as taking a gun — walk
+    // up to it and press E — and while you have it, WASD is her helm and the mouse
+    // is only your head. See battleship/wheelhouse.js and player/helmStation.js.
+    conn: { wheelhouse: battleship.wheelhouse },
     // On the forecastle, forward of A turret, looking aft down the length of
     // her. The height is found by dropping onto whatever is under the mark.
     spawn: { position: new Vector3(0, 20, 66), heading: Math.PI },
@@ -574,8 +684,19 @@ async function main() {
   // WASD is the helm or it is your legs, never both. Nothing is rung down or
   // reset while you are on foot, and the ship holds whatever she was doing —
   // which is the point: you want to walk her deck while she is under way.
+  //
+  // With one exception, and it is the whole point of the wheelhouse: standing at
+  // her wheel with your hands on it, WASD is the helm again. It is the *same* helm
+  // — the same telegraph, the same wheel, the same handling model — because a
+  // second copy of it that only worked from the bridge would be two ships. R is
+  // held back, though: at the wheel it must not put her back on the origin, and on
+  // foot it is the key that puts the player on his spawn mark.
+  const onFoot = () => firstPerson.active && !firstPerson.conning;
   const helm = attachBoatControls(boat, { isActive: () => helmTarget === boat && !firstPerson.active });
-  const shipHelm = attachBoatControls(ship, { isActive: () => helmTarget === ship && !firstPerson.active });
+  const shipHelm = attachBoatControls(ship, {
+    isActive: () => helmTarget === ship && !onFoot(),
+    canReset: () => helmTarget === ship && !firstPerson.active,
+  });
 
   // debug views
   const debug = createDebugView();
@@ -615,7 +736,11 @@ async function main() {
 
   let view = 'fft';
   let followBoat = true;
-  let night = false;
+  // Which way the N key will take her next. Seeded from the time she actually
+  // starts at rather than assumed: she opens at night now (see `timeOfDay` in
+  // ocean/params.js), and a flag hard-coded to `false` would have offered to
+  // turn on the night she was already in.
+  let night = params.timeOfDay < 0.5;
 
   // swap the helm between the launch and the battleship, and put the camera
   // behind whichever hull you just took
@@ -624,11 +749,32 @@ async function main() {
     frameHull(helmTarget);
   };
 
-  createNavButtons({ onChangeBoat: swapHelm, onGoAboard: () => firstPerson.toggle() });
+  createNavButtons({
+    onChangeBoat: swapHelm,
+    onGoAboard: () => firstPerson.toggle(),
+    // Straight into a turret with your hands on the gear. Press it again and you
+    // are in the next one, which is the fastest way to check all four.
+    // The forward turret specifically: it is the one that sits on the deck
+    // rather than on a bandstand, so its room is up in the gunhouse and turns
+    // with the guns — which is the case worth looking at.
+    onFrontCannon: () => firstPerson.goToStation(firstPerson.stationById.get('turret.A')),
+    onTestCannons: () => {
+      const st = firstPerson.nextGun();
+      if (st) hud.flash?.(`at the gear in ${st.id}`);
+    },
+    // Straight to the wheel. The climb is a door in her side, a hallway through the
+    // pagoda's base and eleven metres of ladder, and when what you want is to drive
+    // her from the bridge you should not have to make it every time.
+    onTakeHelm: () => {
+      if (firstPerson.goToHelm()) hud.flash?.('you have the wheel');
+    },
+  });
 
   addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'v') { firstPerson.toggle(); return; }
+    if (k === 't') { firstPerson.nextGun(); return; }
+    if (k === 'h') { firstPerson.goToHelm(); return; }
     if (k === 'n') { night = !night; setTimeOfDay(night ? 0 : 1); return; }
     // Everything below drives the ship or the debug views. On foot, none of it
     // should answer — WASD is your legs and R would put the helm back to zero
@@ -636,15 +782,17 @@ async function main() {
     if (firstPerson.active) {
       if (k === 'e') {
         // The one hand-on-the-gear key: take the set of controls you are standing
-        // at, or let go of the one you are holding.
+        // at, or let go of the one you are holding. It does not care which kind of
+        // gear it is — a gun's training handwheels or the ship's wheel.
         if (firstPerson.laying) firstPerson.leaveGun();
-        else if (firstPerson.near) firstPerson.takeGun(firstPerson.near);
+        else if (firstPerson.conning) firstPerson.leaveWheel();
+        else if (firstPerson.near) firstPerson.takeControls(firstPerson.near);
       } else if (k === 'z') firstPerson.cycleMag();
-      else if (k === 'g' && !firstPerson.laying) {
+      else if (k === 'g' && !firstPerson.laying && !firstPerson.conning) {
         firstPerson.player.state.fly = !firstPerson.player.state.fly;
-      } else if (k === 'r' && !firstPerson.laying) firstPerson.player.respawn();
-      // 1/2/3 pick what is loaded, the same three the rig has.
-      else if (k >= '1' && k <= String(SHELL_TYPES.length)) shellType = SHELL_TYPES[Number(k) - 1];
+      } else if (k === 'r' && !firstPerson.laying && !firstPerson.conning) {
+        firstPerson.player.respawn();
+      }
       return;
     }
     if (k === 'c') followBoat = !followBoat;
@@ -744,6 +892,8 @@ async function main() {
       fires: fx.fireSmoke.on,
       // wreckage resting on her decks slides off when she rolls far enough
       heel: ship.heel,
+      // and the rooms inside her are only drawn when the eye can see into one
+      viewer: camera.position,
     });
 
     // The hull has drawn itself by now — position and the visual quaternion
@@ -758,6 +908,9 @@ async function main() {
       seaHeight: shipSea.height,
       onHit: onShellHit,
       onMiss: onShellMiss,
+      // A shell is in the air for seconds at a time and the air is moving.
+      wind: trueWind,
+      camera,
     });
 
     const followed = helmTarget;
@@ -779,6 +932,11 @@ async function main() {
     shipContact.sync(ship);
     setShadowSpan(followed === ship ? 130 : 34);
     placeSun(followed.position.x, followed.position.z); // keep the shadow map on the conned ship
+    // Skip the deck's shadow pass entirely once the sun is down — it shadows the
+    // sun and nothing else — and halve its rate the rest of the time.
+    deckShadowFrame++;
+    deckLight.shadow.needsUpdate = shading.night.value < 0.75
+      && deckShadowFrame % 3 === 0;
 
     if (spray) spray.update(dt, camera.position, windVec);
     // On foot the eye belongs to the character controller, which has already
@@ -818,6 +976,25 @@ async function main() {
         + `${g.lay.reload > 0 ? `reloading ${g.lay.reload.toFixed(1)}s` : 'ready'} · `
         + `${firstPerson.magnification} · ${ship.heel.toFixed(0)}° of heel`,
       );
+    } else if (hudAccum >= 0.25 && firstPerson.conning) {
+      hudAccum = 0;
+      // At the wheel the corner is a helmsman's: what was rung down, what the
+      // engine room has actually given you, where the rudder has got to, and the
+      // heading it is producing. Nothing about where you are standing — you are
+      // standing at the wheel.
+      const r = firstPerson.conning.readout();
+      const rud = Math.abs(r.rudder) < 0.5 ? 'amidships'
+        : `${Math.abs(r.rudder).toFixed(0)}° ${r.rudder > 0 ? 'starboard' : 'port'}`;
+      hud.set(
+        `${(1000 / emaWall).toFixed(0)} fps\n` +
+        `at the wheel · ${r.telegraph} (engines ${(r.ordered * 100).toFixed(0)}%) · ` +
+        `${r.knots.toFixed(1)} kn\n` +
+        `wheel ${rud} · heading ${r.heading.toFixed(0)}° · ` +
+        `turn ${ship.turnRate.toFixed(1)}°/s · heel ${ship.heel.toFixed(0)}°\n` +
+        `${battleship.damage.alive('bridge') ? '' : 'BRIDGE WRECKED · '}` +
+        'W/S = telegraph · A/D = wheel · SPACE = stop · mouse = look round · ' +
+        'E = let go of the wheel · V or ESC = back to the sea',
+      );
     } else if (hudAccum >= 0.25 && aboard) {
       hudAccum = 0;
       // On foot the interesting numbers are different ones: where you are on
@@ -829,17 +1006,21 @@ async function main() {
         `${(1000 / emaWall).toFixed(0)} fps\n` +
         `on deck · frame ${(p.position.z / battleship.hull.length + 0.5).toFixed(2)} L · ` +
         `x ${p.position.x.toFixed(1)} m · ${p.position.y.toFixed(1)} m above the waterline\n` +
-        `${st.grounded ? `standing on ${st.standingOn ?? 'the deck'}` : 'in the air'} · ` +
+        `${st.climbing ? 'on the ladder'
+          : st.grounded ? `standing on ${st.standingOn ?? 'the deck'}` : 'in the air'} · ` +
         `deck tilt ${(Math.asin(Math.min(st.tilt, 1)) * 180 / Math.PI).toFixed(1)}° · ` +
         `heel ${ship.heel.toFixed(0)}° · ${ship.knots.toFixed(1)} kn · ` +
         `hull ${(s.hullOmega.length() * 180 / Math.PI).toFixed(1)}°/s\n` +
         `${st.grounded ? `${p.speed.toFixed(1)} m/s` : 'falling'} · ` +
-        `loaded ${shellType.key} (${shellType.name})${gunnery.count ? ` · ${gunnery.count} in the air` : ''}` +
+        `loaded ${SHELL.key} (${SHELL.name})${gunnery.count ? ` · ${gunnery.count} in the air` : ''}` +
         `${st.fly ? ' · FLYING' : ''}${st.overboard ? ` · overboard ${st.overboard}x` : ''}\n` +
         `${firstPerson.inside ? `inside ${firstPerson.inside.id} · trained ${firstPerson.inside.mount.yaw.toFixed(0)}°` : ''}` +
-        `${firstPerson.near ? '  [ E or CLICK — take the gun ]' : ''}\n` +
+        `${firstPerson.near
+          ? `  [ E or CLICK — take the ${firstPerson.near.kind === 'helm' ? 'wheel' : 'gun'} ]`
+          : ''}` +
+        `${st.climbing ? '  [ W — up the ladder, S — down ]' : ''}\n` +
         'WASD = walk · SHIFT = run · SPACE = jump · mouse = look · CLICK = shoot her · ' +
-        `1/2/3 = shell · R = spawn mark · G = fly · N = ${night ? 'day' : 'night'} · V or ESC = back to the sea`,
+        `R = spawn mark · G = fly · H = the wheel · N = ${night ? 'day' : 'night'} · V or ESC = back to the sea`,
       );
     } else if (hudAccum >= 0.25) {
       hudAccum = 0;

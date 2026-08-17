@@ -11,8 +11,10 @@ import { merge } from './mergeGeometry.js';
 import { skyColor } from '../ocean/sky.js';
 import {
   section, sideAt, deckAt, keelAt, halfBeamAt, hullTSL, HULL_STATIONS, INNER_DECKS, PLATING,
+  zOf,
 } from './hull.js';
 import { SHIP, COMPARTMENTS, SUPER } from './spec.js';
+import { bridgeHallGap } from './bridgeAccess.js';
 
 // The inside of her.
 //
@@ -278,9 +280,43 @@ const HOUSES = () => [
     y: deckAt(SUPER.funnelDeck.z + 0.5), z: SUPER.funnelDeck.z },
   { id: 'deckhouses', w: SUPER.aftSuper.w, h: SUPER.aftSuper.h, l: SUPER.aftSuper.l,
     y: deckAt(SUPER.aftSuper.z + 0.5), z: SUPER.aftSuper.z },
-  // the pagoda's base blockhouse — the same two boxes the colliders carry
-  { id: 'bridge', w: 17, h: 4, l: 21, y: deckAt(SUPER.bridge.z + 0.5), z: SUPER.bridge.z, dz: -1 },
+  // The pagoda's base blockhouse, in two pieces with the hallway to the bridge
+  // between them.
+  //
+  // One box would be quicker and is wrong, because that blockhouse is not a sealed
+  // shell any more: there is a door in her port side and a passage straight through
+  // to the ladder trunk (see bridgeAccess.js). A liner across that passage is a wall
+  // in the middle of it — a dark one, with the liner's own flat for a ceiling — and
+  // it is the first thing anybody walking to the wheelhouse hits.
+  //
+  // The two pieces still cover the whole blockhouse either side of the passage, so a
+  // shell hole anywhere else in it still looks into a compartment rather than at the
+  // sky, which is the only reason the liner exists.
+  ...bridgeBaseLiners(),
 ];
+
+// The base blockhouse's liner, split around the hallway. Derived from the same
+// numbers the carve uses, so the passage and the gap in the liner cannot drift
+// apart.
+function bridgeBaseLiners() {
+  const y = deckAt(SUPER.bridge.z + 0.5);
+  const z0 = zOf(SUPER.bridge.z);
+  const BOX = { w: 17, h: 4, l: 21, dz: -1 };
+  const gap = bridgeHallGap(); // absolute z of the passage's two faces
+  const aft = z0 + BOX.dz - BOX.l / 2;
+  const fwd = z0 + BOX.dz + BOX.l / 2;
+  const out = [];
+  const piece = (z0p, z1p) => {
+    if (z1p - z0p < 0.4) return; // not worth a mesh
+    out.push({
+      id: 'bridge', w: BOX.w, h: BOX.h, l: z1p - z0p, y,
+      z: SUPER.bridge.z, dz: (z0p + z1p) / 2 - z0,
+    });
+  };
+  piece(aft, Math.min(gap[0], fwd));
+  piece(Math.max(gap[1], aft), fwd);
+  return out;
+}
 
 // Turn a box outside-in: reverse each triangle and flip its normals, so what is
 // drawn is the inside of the far wall rather than the outside of the near one.

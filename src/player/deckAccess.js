@@ -1,9 +1,13 @@
 import { Vector3 } from 'three/webgpu';
 import { boxHit } from '../battleship/colliders.js';
 import { SHIP, SUPER, TURRETS, TURRET_SPEC } from '../battleship/spec.js';
-import { HOUSE, BANDSTAND_DOOR_H } from '../battleship/turretHouse.js';
+import {
+  HOUSE, chamberSolids, entryVolumes, houseShellSolids,
+} from '../battleship/turretHouse.js';
 import { deckY, zOf } from '../battleship/hull.js';
 import { deckPropSolids } from '../battleship/deckProps.js';
+import { wheelhouseStoop } from '../battleship/wheelhouse.js';
+import { bridgeDoorways, ladderVolumes, platformTop } from '../battleship/bridgeAccess.js';
 import { PLAYER } from './spec.js';
 
 // Getting off the main deck.
@@ -29,6 +33,12 @@ const _q = new Vector3();
 
 const TREAD_RUN = 0.6; // m fore-and-aft per step
 
+// How many deck props had to be made non-solid because they were standing in a
+// doorway. Reported on `poseidon.firstPerson.access` so it is findable rather
+// than silent — a number above zero means deckProps.js and the turret entries
+// disagree about who owns that patch of deck.
+export const blockedByProps = [];
+
 // One flight, as a stack of pillars. `x` is the centreline of the run, `zFoot`
 // the outer edge of the bottom tread, and `dir` which way it climbs. The head of
 // the flight is placed to overlap the deck it lands on, so there is no gap at
@@ -39,12 +49,17 @@ function flight(boxes, {
   const rise = yHead - yFoot;
   const treads = Math.max(1, Math.ceil(rise / (PLAYER.stepUp - 0.03)));
   const step = rise / treads;
+  // Treads overlap by a few centimetres. Butted exactly, two of them share a
+  // face — and a foot landing on that seam is inside neither, because every box
+  // test here is a strict one. You fall between two steps of a ladder, which is
+  // not a thing anybody would think to look for.
+  const LAP = 0.04;
   for (let i = 1; i <= treads; i++) {
     const top = yFoot + step * i;
     boxes.push({
       id,
       c: new Vector3(x, (yFoot - 1 + top) / 2, zFoot + dir * TREAD_RUN * (i - 0.5)),
-      h: new Vector3(halfWidth, (top - yFoot + 1) / 2, TREAD_RUN / 2),
+      h: new Vector3(halfWidth, (top - yFoot + 1) / 2, TREAD_RUN / 2 + LAP),
     });
   }
   // A grating at the head of it. Without somewhere to stand at the top, the last
@@ -134,6 +149,35 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     });
   }
 
+  // Up into the wheelhouse. The ladder trunk lets you out on the air-defence
+  // platform, which is a metre or so under the wheelhouse's own deck, so there are
+  // three treads outside each of her doors — the last of the climb from the weather
+  // deck to the wheel. See wheelhouse.js, which owns where they go.
+  boxes.push(...wheelhouseStoop({ platformTop: platformTop() }));
+
+  // The gunhouses of the turrets that carry a room, as a shell with the door and
+  // the window cut out of it rather than as the solid block the ship's own
+  // colliders use. Tested in the turret's frame, so it trains with her.
+  //
+  // This is the other half of a pair: `firstPerson` tells the ship's space to
+  // skip the solid turret shapes for the player, and these stand in their place.
+  // Without both, either you cannot walk through a door you can see or you can
+  // walk through the plating either side of it.
+  for (const t of TURRETS) {
+    if (t.bandstand > 0) continue; // B and X keep their solid house; their room is below
+    const cz = zOf(t.z);
+    const py = deckY(t.z) + t.deckRise;
+    for (const b of houseShellSolids()) {
+      boxes.push({
+        id: `${t.id}.house`,
+        turret: t.id,
+        pivotZ: cz,
+        c: new Vector3(b.c[0], b.c[1] + py, b.c[2] + cz),
+        h: new Vector3(b.h[0], b.h[1], b.h[2]),
+      });
+    }
+  }
+
   // The main battery's barrels.
   //
   // The ship's own colliders stop at the gunhouse, because until now the only
@@ -164,39 +208,39 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     });
   }
 
-  // The bandstands, as a block with a passage through them.
+  // The bandstands, and the working chamber inside each of them.
   //
   // The ship's own colliders give a superfiring turret a barbette-radius drum
   // and nothing else, because until now the only question was what a falling
   // mast lands on and the drum is the load-bearing part of that answer. A person
-  // walking up to B turret wants the *block* to be there, and wants the passage
-  // through it to be a passage — so here it is, in three pieces, and the barbette
-  // drum standing in the middle of it is the turret's trunk, which is exactly
-  // where a trunk goes.
+  // wants the *block* to be there, the passage through it to be a passage, and
+  // the room inside it to be a room — so all three come in here, from the one
+  // description in turretHouse.js that the plating is drawn from.
+  //
+  // They are in the ship's frame and not a turret's, and that is the point: a
+  // bandstand does not train. B and X are rooms in the ship exactly as the deck
+  // is, which is why walking into one is walking, with nothing to hand you
+  // anywhere. Only A and Y, whose rooms are up in the gunhouse, cross a space.
+  //
+  // Because the player skips the ship's drum entirely (see `skipShapes` in
+  // firstPerson.js), the stretch of barbette it also stood for has to come in
+  // here too: between the bandstand's roof and the gunhouse sitting on it there
+  // is a metre or two of bare barbette, and without this you could stand on the
+  // bandstand and walk into it. Square rather than round, which is the same
+  // trade `chamber.trunk` beside it already makes — it is a metre of drum under
+  // a gunhouse, and nobody is measuring its corners.
   for (const t of TURRETS) {
     if (!t.bandstand) continue;
-    const facing = Math.abs(t.arcCenter) > 90 ? -1 : 1;
-    const w = TURRET_SPEC.barbetteR * 2.5;
-    const halfX = w / 2;
-    const halfZ = w * 1.15 / 2;
-    const y0 = deckY(t.z);
-    const zc = zOf(t.z);
-    const dz = facing * HOUSE.door.z; // the passage, in the ship's frame
-    const d = HOUSE.door.halfLen;
-    const top = y0 + t.bandstand;
-    const seg = (zMin, zMax) => boxes.push({
-      id: `${t.id}.bandstand`,
-      c: new Vector3(0, (y0 + top) / 2, zc + (zMin + zMax) / 2),
-      h: new Vector3(halfX, (top - y0) / 2, (zMax - zMin) / 2),
-    });
-    seg(-halfZ, dz - d);
-    seg(dz + d, halfZ);
-    // and the lintel over the passage
-    boxes.push({
-      id: `${t.id}.bandstand`,
-      c: new Vector3(0, (y0 + BANDSTAND_DOOR_H + top) / 2, zc + dz),
-      h: new Vector3(halfX, (top - y0 - BANDSTAND_DOOR_H) / 2, d),
-    });
+    boxes.push(...chamberSolids(t));
+    const roof = deckY(t.z) + t.bandstand;
+    const under = deckY(t.z) + t.deckRise; // where the gunhouse starts
+    if (under > roof + 0.05) {
+      boxes.push({
+        id: `${t.id}.barbette`,
+        c: new Vector3(0, (roof + under) / 2, zOf(t.z)),
+        h: new Vector3(TURRET_SPEC.barbetteR, (under - roof) / 2, TURRET_SPEC.barbetteR),
+      });
+    }
   }
 
   // Up to the doors of the turrets that stand on the deck rather than on a
@@ -222,8 +266,12 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     for (const side of [-1, 1]) {
       flight(boxes, {
         id: `${t.id}.ladder`,
-        x: side * (HOUSE.halfW + HOUSE.wall + 1.5),
-        halfWidth: 1.1,
+        // Overlapping the gunhouse skin, not standing off it. Set clear of the
+        // plating there is a third of a metre of nothing between the head of
+        // the ladder and the deck inside the door, and a man walking in drops
+        // into it — which reads as the doorway itself being broken.
+        x: side * (HOUSE.halfW + 0.9),
+        halfWidth: 1.3,
         zFoot,
         dir: facing,
         yFoot,
@@ -245,7 +293,33 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
   // `PLAYER.stepUp` is 0.45, so the floor probe walks over it; a drum is 0.88
   // and the lowest wall sample is at 0.55, so it is a wall. That one comparison
   // is the whole of it — see the note on `wallHeights` in character.js.
-  boxes.push(...deckPropSolids());
+  //
+  // Minus anything standing in a doorway. deckProps.js places its own furniture
+  // and checks its own clearances, but it does not know where the ways into the
+  // turrets are, and a crate in front of X turret's passage is a turret nobody
+  // can get into — which is invisible from anywhere except by trying it. The
+  // proper home for this is deckProps' `assertClearance`; until it is taught
+  // about the doorways, they are subtracted here.
+  //
+  // The way to the bridge is subtracted the same way and for the same reason: the
+  // hallway through the pagoda's base and the trunk at the end of it are the only
+  // route to the wheel, and a vent cowl standing in the doorway would close it.
+  {
+    const mouths = [
+      ...TURRETS.flatMap((t) => entryVolumes(t, deckY, zOf)),
+      ...bridgeDoorways(),
+    ];
+    const blocks = (b) => mouths.some((m) => Math.abs(b.c[0] - m.c.x) < b.h[0] + m.h.x + 0.8
+      && Math.abs(b.c[2] - m.c.z) < b.h[2] + m.h.z + 0.8
+      && b.c[1] - b.h[1] < m.c.y + m.h.y);
+    let dropped = 0;
+    for (const prop of deckPropSolids()) {
+      const b = { c: [prop.c.x, prop.c.y, prop.c.z], h: [prop.h.x, prop.h.y, prop.h.z] };
+      if (blocks(b)) { dropped++; continue; }
+      boxes.push(prop);
+    }
+    if (dropped) blockedByProps.push(dropped);
+  }
 
   for (const b of boxes) {
     if (b.turret) {
@@ -291,5 +365,13 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     return best;
   }
 
-  return { query, boxes };
+  return {
+    query,
+    boxes,
+    // The one way up this ship that is not a flight of treads. It is a mode rather
+    // than a shape — see `ladderAt` in character.js — so it rides alongside the
+    // query rather than in it, and a body handed into a gunhouse (where `extra` is
+    // null) cannot be on one.
+    ladders: ladderVolumes(),
+  };
 }

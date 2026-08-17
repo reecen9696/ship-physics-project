@@ -15,10 +15,14 @@ import {
 } from './superstructure.js';
 import { buildRailings } from './railings.js';
 import { buildDeckProps } from './deckProps.js';
+import { bakeLampVolume, lampsInsideVolume } from './lampVolume.js';
+import { createRooms } from './rooms.js';
 import { buildHullScuttles } from './scuttles.js';
 import { createWreck } from './wreck.js';
 import { createDamageModel, STATUS } from './damage.js';
 import { createFireSmoke } from './fx.js';
+import { createMuzzleBlast, boreOf } from './muzzleBlast.js';
+import { elevationFor } from './ballistics.js';
 import { createHullSpray } from '../boat/hullSpray.js';
 import { createDamageField } from './damageField.js';
 import { buildInterior, buildDeckhouseInteriors, buildFloodWater } from './interior.js';
@@ -63,7 +67,9 @@ const TEAR_FLATTEN = 3.2;
 // is the surface those will need: named mounts that train, named components
 // that take damage, and a flooding state the buoyancy solver can consume.
 
-export function createBattleship({ shading, sunShadow }) {
+export function createBattleship({
+  shading, sunShadow, deckShadow = null, castLayer = 1,
+}) {
   const root = new Group();
   root.name = 'battleship';
   const parts = new Map(); // id -> { object, damage }
@@ -84,7 +90,9 @@ export function createBattleship({ shading, sunShadow }) {
   // lives in vertex attributes or in an indexed damage array. See
   // shipMaterial.js — building a material per mesh instead costs a WGSL compile
   // per mesh, which for a ship of a few hundred parts stops the frame outright.
-  const materials = createShipMaterials({ shading, sunShadow, destruction: field.shading });
+  const materials = createShipMaterials({
+    shading, sunShadow, deckShadow, destruction: field.shading,
+  });
   const damageUniforms = new Map();
   const uni = (id) => {
     if (!damageUniforms.has(id)) damageUniforms.set(id, materials.handleFor(id));
@@ -147,6 +155,7 @@ export function createBattleship({ shading, sunShadow }) {
     buildScrews({ materials }),
   ];
   const screwUnit = superUnits.find((x) => x.id === 'screws');
+  const bridgeUnit = superUnits.find((x) => x.id === 'bridge');
   for (const u of superUnits) {
     root.add(u.object);
     parts.set(u.id, { object: u.object, damage: u.damage });
@@ -241,6 +250,7 @@ export function createBattleship({ shading, sunShadow }) {
   const turrets = [];
   for (const t of TURRETS) {
     const m = createMainTurret({
+      turret: t,
       id: t.id, materials, arcCenter: t.arcCenter, arc: t.arc,
       barbetteHeight: t.deckRise, bandstand: t.bandstand || 0,
     });
@@ -280,6 +290,12 @@ export function createBattleship({ shading, sunShadow }) {
 
   // --- damage model ----------------------------------------------------------
   const fx = createFireSmoke({ shading });
+  // What her guns do when they go off: the flash, the smoke off the muzzle, the
+  // recoil, and the light it all throws back on her. Every mount on the ship can
+  // be fired through this — see muzzleBlast.js, which scales the whole event off
+  // the bore, so the same call gives a 16-inch gun a fifteen-metre flash and a
+  // 25 mm gun a wisp.
+  const blast = createMuzzleBlast({ smoke: fx, root });
   const damage = createDamageModel();
   // Water is no longer a number this owns. `flooding.js` holds it, because it
   // is a question about holes and heads and where the water sits, and none of
@@ -392,6 +408,69 @@ export function createBattleship({ shading, sunShadow }) {
     if (!o.isMesh) return;
     o.userData.fieldXform = new Matrix4().multiplyMatrices(_rootInv, o.matrixWorld);
   });
+
+  // --- who casts a shadow, and who catches one ---------------------------------
+  //
+  // One rule, and it is the whole of the split the second shadow map needs:
+  // everything that is not the deck casts, and the deck receives.
+  //
+  // Stating it as a rule rather than as a list matters, because the list would
+  // be wrong within a week — a crate added to deckProps.js or a platform added
+  // to the pagoda would silently stop throwing a shadow, and nobody would think
+  // to come here. Reading it off the material instead means the only way to get
+  // it wrong is to draw something new *on* the deck material, which is a thing
+  // nobody does by accident.
+  //
+  // Why it has to be a rule at all, rather than everything simply casting and
+  // receiving: see the note beside `deckShadow` in main.js. A mesh cannot both
+  // write this map and read it. The layer is what enforces that — the shadow
+  // camera is set to it, so the deck is not merely told not to cast, it is never
+  // drawn into the map.
+  //
+  // The one exception is a room inside her, and it is not really an exception to
+  // the rule so much as a statement of where the rule applies: the rule is about
+  // what stands in the weather, and a ready rack bolted to the inside of a
+  // gunhouse does not. See rooms.js, which marks them — and which also stops
+  // drawing them at all once the eye is too far off to see through the door.
+  const rooms = createRooms(root);
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    if (o.material === materials.deck) { o.receiveShadow = true; return; }
+    if (rooms.inRoom(o)) return;
+    o.castShadow = true;
+    o.layers.enable(castLayer);
+  });
+
+  // --- and where her lights are ------------------------------------------------
+  //
+  // Collected from the builders that drew the windows and the scuttles, the same
+  // way their collision solids are, and handed to the materials as a rig in her
+  // own frame. Nothing here decides where a light goes — that is settled beside
+  // the geometry it belongs to, which is the only place it can be settled and
+  // stay true.
+  //
+  // Done at this point rather than at the head of the file because the rig is
+  // read through the same per-mesh ship transform the damage field is, and that
+  // transform has only just been baked.
+  const shipLamps = [
+    ...superUnits.flatMap((un) => un.lamps || []),
+    // and the red ones inside the turrets, which the mounts report the same way
+    ...turrets.flatMap((m) => m.lamps || []),
+  ];
+  materials.setLamps(shipLamps);
+  // And bake what stops them. Done here, once, after both halves are known: the
+  // lamps have just been placed, and the crates and deckhouses that block them
+  // have been standing since the top of this function. From now on the answer is
+  // a texture fetch — see lampVolume.js for why a thing that cannot change is
+  // not worth recomputing sixty times a second.
+  {
+    const inside = lampsInsideVolume(shipLamps);
+    if (inside.length < shipLamps.length) {
+      console.warn(`ship: ${shipLamps.length - inside.length} lamp(s) outside the `
+        + 'shadow volume — their light will pass through everything');
+    }
+    bakeLampVolume(materials.lampVolume, shipLamps);
+  }
 
   // --- what a falling piece can land on ---------------------------------------
   //
@@ -634,6 +713,18 @@ export function createBattleship({ shading, sunShadow }) {
     }
   }
   const _rootQi = new Quaternion();
+
+  // Fire one gun of one mount: the blast at the muzzle, the recoil, and where
+  // the shell leaves from and along what line. The shell itself is not this
+  // module's business — see gunnery.js — but everything that happens at the gun
+  // is, and it is the same call for a main turret, a casemate or an AA mount.
+  const _gunDir = new Vector3();
+  function fireGun(mount, gun) {
+    if (mount.destroyed) return null;
+    const muzzle = blast.fire(gun, { barrelR: mount.barrelR });
+    gun.barrel.getWorldDirection(_gunDir);
+    return { muzzle, dir: _gunDir.clone(), bore: boreOf(mount.barrelR) };
+  }
 
   function strike({
     point, dir = null, kind = 'HE', componentId = null,
@@ -1030,8 +1121,12 @@ export function createBattleship({ shading, sunShadow }) {
   function update(dt, {
     throttle = 0, velocity = null, wind = null, dcEffort = 1, sea = FLAT_SEA,
     funnelSmoke: makeSmoke = true, fires: makeFires = true, heel = 0,
+    // Where the eye is, in world space. The rooms inside her are only drawn when
+    // it is near enough to see into one — see rooms.js.
+    viewer = null,
   } = {}) {
     heelDeg = heel;
+    rooms.update(viewer);
     for (const m of mounts.values()) m.update(dt);
     // anything on the superstructure that moves under its own power — the radar
     // arrays on the masts sweep, and stop when the mast they stand on is killed
@@ -1157,6 +1252,12 @@ export function createBattleship({ shading, sunShadow }) {
       }
     }
     fx.update(dt, _w);
+    // The guns: the flash burning down, the barrels running out, and the light
+    // any of that is throwing on her paint this frame. `setFlashes` is a handful
+    // of floats and is written every frame whether or not anything is firing,
+    // because the frame it stops being written is the frame a flash sticks.
+    blast.update(dt);
+    materials.setFlashes(blast.lampList());
     // Wreckage needs to know where she is, not just where the sea is: it does
     // its contacts in her frame so that a piece can come to rest on a deck that
     // is itself rolling.
@@ -1177,6 +1278,11 @@ export function createBattleship({ shading, sunShadow }) {
     materials,
     clearances,
     fx,
+    // Her guns going off: the flash, the smoke, the recoil, the light it throws.
+    // Whatever is pulling the trigger calls `fireGun` and then puts a shell into
+    // the gunnery from the muzzle and line it hands back.
+    blast,
+    fireGun,
     railings,
     deckProps,
     // these live in world space; main.js puts them in the scene itself
@@ -1199,6 +1305,13 @@ export function createBattleship({ shading, sunShadow }) {
     burst,
     interior,
     floodWater,
+    // The room she is conned from, and the ladder up to it. Both come off the
+    // pagoda — see superstructure.js — and both are wanted by the player rather
+    // than by the ship: the wheelhouse so its wheel can be turned by whatever the
+    // helm is doing, the ladder because climbing one is a mode of the character
+    // controller and not a shape it can walk on.
+    wheelhouse: bridgeUnit ? bridgeUnit.wheelhouse : null,
+    ladders: bridgeUnit ? bridgeUnit.ladders : [],
     // Every damaging event goes through this. See the note where it is defined.
     strike,
     state,
@@ -1215,6 +1328,7 @@ export function createBattleship({ shading, sunShadow }) {
       // wreck group before they are bolted back where they came from
       fittings.repair();
       shards.clear();
+      blast.clear();
       colliders.clearStumps();
       for (const mesh of floodWater.byCompartment.values()) mesh.visible = false;
       root.traverse((o) => { if (o.isMesh) delete o.userData.cutPlane; });
@@ -1235,9 +1349,11 @@ export function createBattleship({ shading, sunShadow }) {
       const local = root.worldToLocal(worldPoint.clone());
       const yaw = Math.atan2(-local.x, local.z) * 180 / Math.PI;
       const range = Math.hypot(local.x, local.z);
-      // rough gravity arc for a 250 m/s shell, small-angle solution
-      const elev = Math.min(TURRET_SPEC.elevMax,
-        0.5 * Math.asin(Math.min(1, (range * 9.81) / (250 * 250))) * 180 / Math.PI);
+      // Off the firing table, which is the same one the sight reads and the same
+      // integrator the shells fly on — see ballistics.js. It used to be a
+      // small-angle vacuum solution for a velocity no shell on this ship has,
+      // and the battery laid two degrees low at every range past a mile.
+      const elev = Math.min(TURRET_SPEC.elevMax, elevationFor(range));
       for (const m of turrets) if (!m.destroyed) m.setTarget(yaw, elev);
       return { yaw, elev, range };
     },

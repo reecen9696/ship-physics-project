@@ -57,7 +57,7 @@ export const COMPARTMENTS = [
 // the arithmetic against the actual sheer rather than trusting these numbers.
 export const TURRETS = [
   { id: 'turret.A', z: +0.25, deckRise: 0.9, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: null },
-  { id: 'turret.B', z: +0.15, deckRise: 5.6, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: 'turret.A', bandstand: 4.0 },
+  { id: 'turret.B', z: +0.15, deckRise: 5.8, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: 'turret.A', bandstand: 4.0 },
   { id: 'turret.X', z: -0.25, deckRise: 5.4, arcCenter: 180, arc: 150, compartment: 'hull.aft', superfires: 'turret.Y', bandstand: 3.8 },
   { id: 'turret.Y', z: -0.36, deckRise: 0.9, arcCenter: 180, arc: 150, compartment: 'hull.aft', superfires: null },
 ];
@@ -69,8 +69,9 @@ export const TURRET_SPEC = {
   // people in it, and 2.7 m of outside height left 2.2 inside, which is a
   // doorway you duck through. `assertSuperfiringClearance` at the foot of this
   // file is what says how much of this the superfiring pairs can afford — at 3.2
-  // B still clears A by 0.40 m at full depression.
-  gunhouseH: 3.2,
+  // B clears A by 0.37 m at full depression once B's barbette is raised the 0.2 m
+// below to pay for the taller roof under it.
+  gunhouseH: 3.6,
   barbetteR: 4.6,
   barrelLength: 16.0,
   barrelR: 0.34, // scales the whole profile; the breech is ~2x this

@@ -2,7 +2,7 @@ import {
   Data3DTexture, RGBAFormat, UnsignedByteType, LinearFilter, ClampToEdgeWrapping,
   Vector3, Vector4,
 } from 'three/webgpu';
-import { uniform, uniformArray } from 'three/tsl';
+import { uniform, uniformArray } from '../scene/uniforms.js';
 import { makeNoise3D } from '../util/noise3D.js';
 
 // Where the ship has been hurt, as a field in space rather than a number on a part.

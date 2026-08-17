@@ -858,8 +858,12 @@ export function deckPropPlacements() {
   for (const side of [-1, 1]) {
     add('hatch', { z: -0.048, hug: 1.3, side, yaw: -side * (Math.PI / 2) });
     add('scuttle', { z: 0.130, edge: 1.5, side });
-    // forward of the shelter deck, where the strip opens out again
-    add('cowl', { z: 0.083, hug: 1.0, side, scale: 1 + jit(0.08) });
+    // Forward of the shelter deck, where the strip opens out again — and aft of
+    // the bridge's ladder trunk, which now stands on this patch of deck against
+    // the pagoda's starboard side (see bridgeAccess.js). At 0.083 the bell of this
+    // cowl came through the trunk's after plating, which you could see from inside
+    // the trunk while climbing it.
+    add('cowl', { z: 0.075, hug: 1.0, side, scale: 1 + jit(0.08) });
     add('mushroom', { z: 0.112, hug: 0.95, side });
   }
   // A fairlead for the midships spring, and no bitts to go with it: a 0.6 m

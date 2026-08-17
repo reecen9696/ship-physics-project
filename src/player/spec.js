@@ -53,6 +53,16 @@ export const PLAYER = {
   // the floor probe simply finds the next tread.
   stepUp: 0.45, // m
   snapDown: 0.5, // m the feet stay glued to a deck falling away beneath them
+
+  // How fast you go up a ladder.
+  //
+  // A vertical ladder is the one way up this ship that the invisible-tread trick
+  // cannot build: treads make a 35-degree ramp, and the eleven metres from the
+  // weather deck to the air-defence platform would want sixteen metres of run that
+  // the pagoda has not got. So a ladder is a *mode* — see `ladderAt` in
+  // character.js — and this is the climb rate in it. Brisk on purpose: a real man
+  // does 0.5 m/s and the eleven metres would take twenty-two seconds.
+  climb: 3.2, // m/s
   maxSlopeCos: Math.cos((52 * Math.PI) / 180), // steeper than this is not a floor
 
   // --- the inertial layer (see shipSpace.js §5) --------------------------------
