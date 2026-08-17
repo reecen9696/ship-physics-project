@@ -109,7 +109,13 @@ export function createFirstPerson({
   let laying = null; // the station whose gear is in our hands, or null
   let inside = null; // the station whose gunhouse we are standing in, or null
   let grace = 0;
-  let mag = 1;
+  // Which of LAYING.fov is in use. Starts at 0 — x1 — and is put back there
+  // every time a gun is taken, so every turret opens at the naked-eye field
+  // rather than at whatever the last one was left on. x12 was the old default
+  // and it is the wrong one to arrive at: you come to the gun not knowing where
+  // anything is, and a nine-degree field is for laying on something you have
+  // already found.
+  let mag = 0;
   let near = null; // a station's controls within reach
   const saved = { position: new Vector3(), target: new Vector3(), fov: 0 };
 
@@ -132,6 +138,7 @@ export function createFirstPerson({
   function takeGun(station) {
     if (!station || !station.alive()) return;
     laying = station;
+    mag = 0; // every gun opens at x1
     station.lay.held = true;
     station.sync(); // start from where the guns actually are, in world angles
     avatar.group.visible = false;
