@@ -25,6 +25,7 @@ const GRAVITY = 9.81;
 const _m = new Matrix4();
 const _pos = new Vector3();
 const _q = new Quaternion();
+const _dq = new Quaternion();
 const _scale = new Vector3(1, 1, 1);
 const _axis = new Vector3();
 const _dummy = new Object3D();
@@ -88,6 +89,12 @@ export function createShards({ shading, count = 320 }) {
   const quat = new Float32Array(count * 4);
   const size = new Float32Array(count);
   const life = new Float32Array(count);
+  // 1 once the piece is under the surface. It does not stop existing there —
+  // it goes in, slows to nothing, and drifts down out of sight behind the
+  // ocean, which draws last and writes depth. Cutting it at the waterline
+  // instead is a row of forty pieces of steel blinking out along a line, which
+  // is the one thing the eye does catch.
+  const wet = new Uint8Array(count);
   let cursor = 0;
   let alive = 0;
 
@@ -121,6 +128,7 @@ export function createShards({ shading, count = 320 }) {
       quat[q] = 0; quat[q + 1] = 0; quat[q + 2] = 0; quat[q + 3] = 1;
       size[i] = scale * (0.5 + Math.random() * 1.4);
       life[i] = 3.5 + Math.random() * 3.0;
+      wet[i] = 0;
       heatAttr.array[i] = hot * (0.5 + Math.random() * 0.5);
     }
   }
@@ -140,10 +148,12 @@ export function createShards({ shading, count = 320 }) {
       }
       alive++;
       const j = i * 3;
-      vel[j + 1] -= GRAVITY * dt;
-      // A thin plate has a lot of drag for its mass and loses its speed fast,
+      // Torn plate in water: it keeps almost nothing of what it arrived with.
+      // Above the surface a thin plate still has a lot of drag for its mass,
       // which is why shrapnel does not travel like a cannonball.
-      const d = 1 / (1 + 1.15 * dt);
+      const sank = wet[i] === 1;
+      vel[j + 1] -= (sank ? 1.1 : GRAVITY) * dt;
+      const d = 1 / (1 + (sank ? 5.0 : 1.15) * dt);
       vel[j] *= d; vel[j + 1] *= d; vel[j + 2] *= d;
       pos[j] += vel[j] * dt;
       pos[j + 1] += vel[j + 1] * dt;
@@ -152,13 +162,18 @@ export function createShards({ shading, count = 320 }) {
       const q = i * 4;
       _q.set(quat[q], quat[q + 1], quat[q + 2], quat[q + 3]);
       _axis.set(spin[j] * dt * 0.5, spin[j + 1] * dt * 0.5, spin[j + 2] * dt * 0.5);
-      const dq = new Quaternion(_axis.x, _axis.y, _axis.z, 1).normalize();
-      _q.premultiply(dq);
+      _dq.set(_axis.x, _axis.y, _axis.z, 1).normalize();
+      _q.premultiply(_dq);
       quat[q] = _q.x; quat[q + 1] = _q.y; quat[q + 2] = _q.z; quat[q + 3] = _q.w;
 
-      heatAttr.array[i] *= 1 / (1 + 1.4 * dt);
+      heatAttr.array[i] *= 1 / (1 + (sank ? 40 : 1.4) * dt);
 
-      if (pos[j + 1] < seaHeight) { life[i] = 0; continue; }
+      if (!sank && pos[j + 1] < seaHeight) {
+        wet[i] = 1;
+        // it goes in, and the water has it
+        spin[j] *= 0.2; spin[j + 1] *= 0.2; spin[j + 2] *= 0.2;
+        if (life[i] > 1.2) life[i] = 1.2;
+      }
 
       _pos.set(pos[j], pos[j + 1], pos[j + 2]);
       _scale.setScalar(size[i]);
@@ -171,6 +186,7 @@ export function createShards({ shading, count = 320 }) {
 
   function clear() {
     life.fill(0);
+    wet.fill(0);
     heatAttr.array.fill(0);
     for (let i = 0; i < count; i++) {
       _dummy.position.set(0, -1e5, 0);

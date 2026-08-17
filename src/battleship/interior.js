@@ -1,5 +1,5 @@
 import {
-  BufferGeometry, BufferAttribute, Group, Mesh, MeshBasicNodeMaterial, Vector3,
+  BoxGeometry, BufferGeometry, BufferAttribute, Group, Mesh, MeshBasicNodeMaterial, Vector3,
 } from 'three/webgpu';
 import {
   Fn, vec2, vec3, vec4, float, uniform, positionLocal, normalize, dot, saturate,
@@ -12,7 +12,7 @@ import { skyColor } from '../ocean/sky.js';
 import {
   section, sideAt, deckAt, keelAt, halfBeamAt, hullTSL, HULL_STATIONS,
 } from './hull.js';
-import { SHIP, COMPARTMENTS } from './spec.js';
+import { SHIP, COMPARTMENTS, SUPER } from './spec.js';
 
 // The inside of her.
 //
@@ -239,6 +239,75 @@ export function buildInterior({ materials }) {
   }
 
   return { group, byCompartment };
+}
+
+// --- the inside of the deckhouses --------------------------------------------
+//
+// The same argument as the hull liner, for the boxes standing on her deck. A
+// deckhouse is a plate shell and nothing else, so a shell that opens its side
+// shows you the far wall — which is facing away and is culled — and then the
+// sky beyond that. A hole you can see daylight through does not read as a hole
+// in a building; it reads as the building not being there. That is most of why
+// "holes only appear in the deck": the deck has this behind it and the
+// superstructure did not.
+//
+// One inverted shell inset by the plating, a floor at the level a deck would be
+// on, and a bulkhead across the middle so the space has an end to it. Drawn
+// after the plating like the hull liner, so it costs nothing until something
+// opens a way in.
+const HOUSES = () => [
+  { id: 'deckhouses', w: SUPER.funnelDeck.w, h: SUPER.funnelDeck.h, l: SUPER.funnelDeck.l,
+    y: deckAt(SUPER.funnelDeck.z + 0.5), z: SUPER.funnelDeck.z },
+  { id: 'deckhouses', w: SUPER.aftSuper.w, h: SUPER.aftSuper.h, l: SUPER.aftSuper.l,
+    y: deckAt(SUPER.aftSuper.z + 0.5), z: SUPER.aftSuper.z },
+  // the pagoda's base blockhouse — the same two boxes the colliders carry
+  { id: 'bridge', w: 17, h: 4, l: 21, y: deckAt(SUPER.bridge.z + 0.5), z: SUPER.bridge.z, dz: -1 },
+];
+
+// Turn a box outside-in: reverse each triangle and flip its normals, so what is
+// drawn is the inside of the far wall rather than the outside of the near one.
+function inward(g) {
+  const a = g.getIndex().array;
+  for (let i = 0; i < a.length; i += 3) { const t = a[i]; a[i] = a[i + 2]; a[i + 2] = t; }
+  const n = g.getAttribute('normal').array;
+  for (let i = 0; i < n.length; i++) n[i] = -n[i];
+  return g;
+}
+
+export function buildDeckhouseInteriors({ materials }) {
+  const group = new Group();
+  group.name = 'ship.interior.houses';
+  const geoms = [];
+
+  for (const b of HOUSES()) {
+    const slot = materials.slotOf(b.id);
+    const add = (g) => geoms.push(paint(g, {
+      color: RAW_STEEL, roughness: 0.86, slot, metal: 0.5, inside: 1, plate: 1,
+    }));
+    const cy = b.y + b.h / 2;
+    const cz = (b.z * SHIP.length) + (b.dz || 0);
+    const g = inward(new BoxGeometry(b.w - 2 * PLATE, b.h - 2 * PLATE, b.l - 2 * PLATE));
+    g.translate(0, cy, cz);
+    add(g);
+    // A flat at the height a deck would be, and one bulkhead across her, so a
+    // hole looks into a compartment instead of into a crate. Thin slabs rather
+    // than sheets because a slab is closed and reads right from either side.
+    const flat = new BoxGeometry(b.w - 2 * PLATE, 0.16, b.l - 2 * PLATE);
+    flat.translate(0, b.y + b.h * 0.55, cz);
+    add(flat);
+    const bhd = new BoxGeometry(b.w - 2 * PLATE, b.h - 2 * PLATE, 0.16);
+    bhd.translate(0, cy, cz + b.l * 0.12);
+    add(bhd);
+  }
+
+  const mesh = new Mesh(merge(geoms), materials.body);
+  mesh.name = 'interior.deckhouses';
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
+  mesh.castShadow = false;
+  mesh.userData.noShadow = true;
+  group.add(mesh);
+  return { group, mesh };
 }
 
 // --- the water in her --------------------------------------------------------

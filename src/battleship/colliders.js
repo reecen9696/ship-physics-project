@@ -16,6 +16,14 @@ import {
 //
 // Each shape carries the component id it belongs to, so a mast coming down
 // across an AA tub damages the AA mount rather than "the ship".
+//
+// Two levels of rejection keep this free even with a deck full of wreckage on
+// it. Every shape carries a box that contains it, tested with six compares
+// before any of the real maths; and the whole ship carries one, so a piece that
+// has gone over the side answers "nothing to hit" for its entire fall without
+// ever looking at a shape. Both boxes are conservative — a shape is always
+// inside its own box, and a severed funnel's box is still the whole funnel's —
+// so neither can produce a false miss.
 
 const _p = new Vector3();
 
@@ -128,6 +136,65 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
       2.2, 1.9, { needs: a.id });
   }
 
+  // --- the boxes everything is rejected against -------------------------------
+  // Built once, after the shape list is complete. A turret's box is the one it
+  // sweeps as it trains — its half-diagonal in plan — so it stays valid at any
+  // bearing without being rebuilt.
+  const bounds = {
+    min: new Vector3(Infinity, Infinity, Infinity),
+    max: new Vector3(-Infinity, -Infinity, -Infinity),
+  };
+  const grow = (x0, y0, z0, x1, y1, z1) => {
+    if (x0 < bounds.min.x) bounds.min.x = x0;
+    if (y0 < bounds.min.y) bounds.min.y = y0;
+    if (z0 < bounds.min.z) bounds.min.z = z0;
+    if (x1 > bounds.max.x) bounds.max.x = x1;
+    if (y1 > bounds.max.y) bounds.max.y = y1;
+    if (z1 > bounds.max.z) bounds.max.z = z1;
+  };
+  for (const sh of shapes) {
+    if (sh.kind === 'box') {
+      sh.min = new Vector3().subVectors(sh.c, sh.h);
+      sh.max = new Vector3().addVectors(sh.c, sh.h);
+    } else if (sh.kind === 'cyl') {
+      const tip = _p.copy(sh.base).addScaledVector(sh.axis, sh.len);
+      sh.min = new Vector3(
+        Math.min(sh.base.x, tip.x) - sh.r,
+        Math.min(sh.base.y, tip.y) - sh.r,
+        Math.min(sh.base.z, tip.z) - sh.r,
+      );
+      sh.max = new Vector3(
+        Math.max(sh.base.x, tip.x) + sh.r,
+        Math.max(sh.base.y, tip.y) + sh.r,
+        Math.max(sh.base.z, tip.z) + sh.r,
+      );
+    } else {
+      const R = Math.hypot(sh.h.x, sh.h.z); // whatever way it is trained
+      sh.min = new Vector3(-R, sh.c.y - sh.h.y, sh.c.z - R);
+      sh.max = new Vector3(R, sh.c.y + sh.h.y, sh.c.z + R);
+    }
+    grow(sh.min.x, sh.min.y, sh.min.z, sh.max.x, sh.max.y, sh.max.z);
+  }
+  // and the hull itself, walked along its own loft
+  {
+    let top = -Infinity;
+    let bot = Infinity;
+    for (let i = 0; i <= 40; i++) {
+      const s = i / 40;
+      top = Math.max(top, deckAt(s));
+      bot = Math.min(bot, -keelAt(s));
+    }
+    grow(-SHIP.halfBeam, bot, -SHIP.length / 2, SHIP.halfBeam, top, SHIP.length / 2);
+  }
+
+  // Can a body of this radius, centred here in the ship's frame, be touching any
+  // part of her? The one question worth asking before the contact solve.
+  function nearBounds(x, y, z, r) {
+    return x + r > bounds.min.x && x - r < bounds.max.x
+      && y + r > bounds.min.y && y - r < bounds.max.y
+      && z + r > bounds.min.z && z - r < bounds.max.z;
+  }
+
   const _n = new Vector3();
   const _q = new Vector3();
 
@@ -160,6 +227,9 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
 
     for (let i = 0; i < shapes.length; i++) {
       const sh = shapes[i];
+      if (p.x < sh.min.x || p.x > sh.max.x) continue;
+      if (p.y < sh.min.y || p.y > sh.max.y) continue;
+      if (p.z < sh.min.z || p.z > sh.max.z) continue;
       if (sh.needs && !alive(sh.needs)) continue;
       let d = 0;
       if (sh.kind === 'box') {
@@ -207,5 +277,5 @@ export function createColliders({ mounts = null, alive = () => true } = {}) {
     for (const sh of shapes) if (sh.severable) delete sh.stump;
   }
 
-  return { query, insideHull, setStump, clearStumps, shapes };
+  return { query, insideHull, nearBounds, bounds, setStump, clearStumps, shapes };
 }

@@ -245,6 +245,36 @@ export const STRUCTURE = {
   'turret.*': { mass: 1_520_000, foot: { r: 5.2 }, spine: null, noTopple: true },
 };
 
+// --- what happens to a piece of her once it is in the water -------------------
+//
+// Seconds on the surface before it swamps. Zero means it goes straight down,
+// which is what almost everything made of ship does.
+//
+// This is stated rather than derived, and it has to be. Whether a thing floats
+// is a question about the air sealed inside it, and the only volume this
+// project has for a piece of wreckage is its bounding box — which says a
+// tripod mast is 97% air and a length of guardrail is 92% air, and is therefore
+// a lie about both. So each number is here with the reason for it written next
+// to it, and the reason is always the same question: what is inside it?
+export const BUOYANCY = {
+  // A funnel is a sealed uptake casing the size of a room, and nearly all of
+  // what is inside it is air. It goes over on its side and swims off, and it is
+  // the piece of a sunk battleship that photographs get taken of.
+  funnel: 34,
+  // Tripod legs are big closed tubes. They hold their air until the water finds
+  // the holes that felled the mast.
+  mainmast: 15,
+  // A gun tub is a shallow open cylinder. Upside down it traps a bubble under
+  // itself, and then it does not.
+  'aa.*': 7,
+  // The conning tower is a solid column of face-hardened plate with an armoured
+  // tube down the middle of it. There is no air in that.
+  bridge: 0,
+  'turret.*': 0,
+  // 25 mm steel bar. It is through the surface before the splash has closed.
+  railings: 0,
+};
+
 // --- flooding ----------------------------------------------------------------
 export const FLOODING = {
   // Discharge coefficient for a torn hole. 0.6 is the textbook value for a

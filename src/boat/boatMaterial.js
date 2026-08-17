@@ -485,19 +485,25 @@ export function createBoatMaterial({
       // the far-away result the honest average of the near-up one instead.
       const n = mix(float(0.5), cellNoise(2.2, 1.7), upTo(110, 240)).toVar(); // ~45 cm
       const n2 = mix(float(0.5), cellNoise(7.0, 3.1), upTo(35, 85)).toVar(); // ~14 cm
-      // Two sources now, and they mean different things. The per-component
-      // number is *wear* — a part that has been worked over is dirty and dull
-      // all over — and it is deliberately capped well short of black, because a
-      // whole hull section going sooty was the thing the damage field exists to
-      // replace. The field's own scorch channel is the burn round an actual
-      // hit, and that one is allowed to go all the way.
-      const wear = float(damage).mul(0.42);
-      const dmg = max(wear, scorchT).mul(fx.hullScorch.u).toVar();
+      // Where the burn is comes from the field and *only* from the field. The
+      // per-component number used to feed this as well — a part that had been
+      // worked over went dirty all over — and it was wrong for the reason the
+      // field was built in the first place: a shell lands in one place, and it
+      // is that place that blackens. Sooting the whole deckhouse because
+      // something hit a corner of it says the hit happened everywhere, and it
+      // swamps the actual crater, which is the thing worth looking at.
+      //
+      // So the scorch is the field's own halo: a blast zone round a hit, of the
+      // size the burst had, and unhit plating stays the colour it was painted.
+      const dmg = scorchT.mul(fx.hullScorch.u).toVar();
       const scorch = smoothstep(float(0).sub(0.25), float(0.25), dmg.sub(n.mul(0.7).add(n2.mul(0.3))));
       const soot = vec3(0.05, 0.045, 0.04).mul(n2.mul(0.5).add(0.6));
       const heat = base.mul(vec3(0.55, 0.42, 0.34)); // browned paint short of charring
       base.assign(mix(base, mix(heat, soot, scorch), saturate(dmg.mul(1.6))));
-      gloss.assign(gloss.mul(float(1).sub(scorch.mul(0.85))));
+      // What the per-component number is still allowed to do is take the shine
+      // off. A part that has been hammered is dull and scuffed over all of it,
+      // and that reads as wear without repainting it.
+      gloss.assign(gloss.mul(float(1).sub(scorch.mul(0.85))).mul(float(1).sub(float(damage).mul(0.35))));
     }
 
     // --- the inside of her ------------------------------------------------------
