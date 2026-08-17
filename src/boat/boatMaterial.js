@@ -543,17 +543,23 @@ export function createBoatMaterial({
       const fr = abs(fract(positionLocal.z.div(1.2)).sub(0.5)).mul(2);
       const st = abs(fract(positionLocal.y.div(1.1)).sub(0.5)).mul(2);
       const ribs = smoothstep(float(0.72), float(0.95), max(fr, st));
-      // Brighter than it was, and it has to be. This is bare unpainted steel in
-      // a space with no lamp in it, which argues for very dark — but the whole
-      // job of the liner is to be the thing you see through a hole, and at the
-      // old value it came out as flat black. A hole with black in it does not
-      // read as a compartment with a deck in it; it reads as a hole through the
-      // ship into nothing, which is the opposite of what it is for. The frames
-      // and stringers only tell you the space has depth and scale if there is
-      // enough light on them to see them by.
-      const raw = vec3(0.20, 0.196, 0.185).mul(float(1).sub(ribs.mul(0.42)));
+      // This is the floor of a chip, and it has to look like one.
+      //
+      // It was shaded as the inside of a ship — bare steel in an unlit space,
+      // which argues for very dark, and came out flat black. Every complaint
+      // about the damage since has been the same complaint: a hole with black
+      // in it does not read as a cavity in a piece of armour, it reads as a way
+      // into a building, and no amount of making the cavity shallower fixes
+      // that while the bottom of it is a void.
+      //
+      // So it is not an interior at all. It is the freshly torn face of her own
+      // plating a hand's breadth down — the same bare, bright, unpainted steel
+      // the rim of every hole is already shaded as — sitting in a shallow recess
+      // and therefore a little shadowed, and nothing more. The frames read as
+      // faint relief across it rather than as decks.
+      const raw = vec3(0.30, 0.295, 0.283).mul(float(1).sub(ribs.mul(0.22)));
       base.assign(mix(base, raw, inside));
-      gloss.assign(mix(gloss, float(0.12), inside));
+      gloss.assign(mix(gloss, float(0.30), inside));
     }
     // --- direct sun, cut by the shadow map ---
     const ndl = saturate(dot(N, shading.sunDir));
@@ -633,8 +639,8 @@ export function createBoatMaterial({
       metal.assign(mix(metal, float(1.0), torn));
     }
     if (interior) {
-      // nothing inside her is polished, and nothing inside her is painted
-      metal.assign(mix(metal, float(0.35), inside));
+      // torn plate: no paint on it anywhere, and it answers as the steel it is
+      metal.assign(mix(metal, float(0.8), inside));
     }
 
     const alpha = rough.mul(rough).toVar();
@@ -642,25 +648,21 @@ export function createBoatMaterial({
     const F0 = mix(vec3(0.04), specTint, metal).toVar();
     const albedo = base.mul(float(1).sub(metal)).toVar();
 
-    // Inside the hull there is no sun and very little sky: what light there is
-    // came in through the hole you are looking through. Scaling the terms rather
-    // than replacing them keeps this on one program, and keeps an interior
-    // shading the same colour of daylight as the plating round the hole.
+    // The floor of a chip is a hand's breadth down and open to the sky, so it is
+    // lit — a little shadowed by the lip standing over it, not cut off from the
+    // day. It used to be cut by nine tenths on the argument that there is no sun
+    // inside a ship, which was answering the wrong question: this is not inside
+    // her, it is a shallow scoop out of her outside.
     //
-    // The one thing it must not do is go to black. Every one of these terms is
-    // multiplied by the surface normal one way or another, and the liner's
-    // normals face *inward* — away from the sun and away from most of the sky —
-    // so scaling them down as well left nothing at all, and a shell hole read as
-    // a window onto the void rather than as a way into a compartment. So the
-    // directional terms are still cut right down, and underneath them there is a
-    // floor: a flat fill, the colour of the daylight coming in through the hole,
-    // that does not care which way the surface is facing. It is what you would
-    // actually see — a dim space with light spilling into it — and it is the
-    // difference between seeing a deck in there and seeing nothing.
-    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.90))) : sun;
-    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.35))) : sky;
+    // The flat fill underneath matters as much as the cut. Every directional
+    // term here is multiplied by the surface normal one way or another, and a
+    // recess faces every which way, so without a term that does not care about
+    // the normal there is always some facet of it that comes out black — and one
+    // black facet is all it takes to read as a hole again.
+    const litSun = interior ? sun.mul(float(1).sub(inside.mul(0.45))) : sun;
+    const litSky = interior ? sky.mul(float(1).sub(inside.mul(0.15))) : sky;
     const fill = interior
-      ? grey(shading.horizon, 0.7).mul(inside.mul(0.30))
+      ? grey(shading.horizon, 0.6).mul(inside.mul(0.45))
       : vec3(0);
     const lit = albedo.mul(litSun.add(litSky).add(bounce).add(fill)).toVar();
 

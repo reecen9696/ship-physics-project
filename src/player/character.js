@@ -360,7 +360,10 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     state.grounded = false;
     state.coyote = 0;
     state.jumpWanted = 0;
-    const floor = topSurface(pos.x, pos.z, pos.y + 2.5, pos.y - 2.5);
+    // Downward-biased, and not far up. A room has a deckhead as well as a deck,
+    // and a probe that starts above it finds the roof and stands you on it —
+    // which is what "arrive inside a gunhouse" looked like the first time.
+    const floor = topSurface(pos.x, pos.z, pos.y + 0.6, pos.y - 3.5);
     if (floor !== null) pos.y = floor + 0.02;
   }
 

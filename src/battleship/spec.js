@@ -65,7 +65,12 @@ export const TURRETS = [
 export const TURRET_SPEC = {
   gunhouseW: 10.0, // m across
   gunhouseL: 12.0, // m fore-and-aft (face to rear)
-  gunhouseH: 2.7,
+  // Tall enough to stand up in and to put a door in. A gunhouse is a room with
+  // people in it, and 2.7 m of outside height left 2.2 inside, which is a
+  // doorway you duck through. `assertSuperfiringClearance` at the foot of this
+  // file is what says how much of this the superfiring pairs can afford — at 3.2
+  // B still clears A by 0.40 m at full depression.
+  gunhouseH: 3.2,
   barbetteR: 4.6,
   barrelLength: 16.0,
   barrelR: 0.34, // scales the whole profile; the breech is ~2x this

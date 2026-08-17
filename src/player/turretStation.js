@@ -182,8 +182,10 @@ export function createTurretStation({
     landing,
     pivot,
     alive: () => !mount.destroyed && damage.alive(turret.id),
-    // the layer's station, and how close you have to be to reach it
-    station: new Vector3(HOUSE.station.x, HOUSE.floor, HOUSE.station.z + 0.9),
-    reach: 1.5,
+    // The layer's station, and how close you have to be to put a hand on it.
+    // Measured to the middle of the pedestal, which you cannot stand in — so the
+    // reach has to cover walking up to any face of it.
+    station: new Vector3(HOUSE.station.x, HOUSE.floor, HOUSE.station.z),
+    reach: 1.7,
   };
 }

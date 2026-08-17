@@ -247,13 +247,16 @@ export function buildDeckSections() {
 // building rather than as damage to a piece of armour.
 //
 // So there is one surface behind her plating, this far in, and it is what you
-// see at the bottom of any wound a shell can make. Only something that reaches
+// see at the bottom of any wound a shell can make. It is deliberately shallow —
+// a chip, not a pit. Deep enough to read as thickness when you are standing on
+// the deck beside it, shallow enough that you are looking at a floor rather
+// than down a shaft. Only something that reaches
 // further than this — a torpedo, a magazine — opens her properly, which is the
 // one time you *should* be looking into her.
 //
 // interior.js draws the backing and colliders.js makes it solid, so this is
 // stated once, here, where deckAt and keelAt already are.
-export const PLATING = 1.15;
+export const PLATING = 0.7;
 
 // The decks inside her that are not the backing: just the one, deep down, which
 // is only ever seen through a torpedo hole.

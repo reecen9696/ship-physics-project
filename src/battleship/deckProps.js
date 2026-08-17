@@ -972,8 +972,16 @@ export function deckPropSolids() {
   const boxes = [];
   for (const p of deckPropPlacements()) {
     const s = SOLID[p.kind];
-    const c = Math.abs(Math.cos(p.yaw));
-    const sn = Math.abs(Math.sin(p.yaw));
+    // A yawed box is given the box its own box sweeps, which is generous the
+    // right way round for something meant to be walked round rather than
+    // through. A yawed *cylinder* is given nothing of the sort — a drum turned
+    // 25 degrees is exactly the same drum — and applying the sweep to one grows
+    // it by a third, which is enough to make two drums standing side by side
+    // report as overlapping and enough to make the player bump an obstacle that
+    // is not there.
+    const round = s.hx === s.hz;
+    const c = round ? 1 : Math.abs(Math.cos(p.yaw));
+    const sn = round ? 0 : Math.abs(Math.sin(p.yaw));
     boxes.push({
       id: `prop.${p.kind}`,
       c: new Vector3(p.x, p.y + s.y0 + s.hy * p.scale, p.z),
@@ -1074,6 +1082,7 @@ function assertClearance(list) {
 // --- the build ----------------------------------------------------------------
 
 const _v = new Vector3();
+const _from = new Vector3();
 const _q = new Quaternion();
 const UP = new Vector3(0, 1, 0);
 
@@ -1245,7 +1254,11 @@ export function buildDeckProps({ materials, onDetach = null }) {
     _queue.push({ x: point.x, y: point.y, z: point.z, r: radius, speed });
     for (let i = 0; i < _queue.length; i++) {
       const q = _queue[i];
-      _v.set(q.x, q.y, q.z);
+      // Its own scratch, not `_v`: detach() uses `_v` to build the impulse and
+      // is handed this as the point it is thrown away from, so sharing one
+      // vector means the first prop in a sweep overwrites the blast centre and
+      // every prop after it is measured against a direction.
+      _from.set(q.x, q.y, q.z);
       for (const p of props) {
         if (!p.alive) continue;
         // Lashed cargo is harder to shift than loose — that is what the rope is
@@ -1253,8 +1266,8 @@ export function buildDeckProps({ materials, onDetach = null }) {
         // does. A drum is wider again: it does not have to be knocked over to
         // let go, only reached.
         const reach = p.lashed ? 0.55 : (p.kind === 'drum' ? 1.8 : 1.4);
-        if (p.centre.distanceTo(_v) > q.r * reach) continue;
-        detach(p, _v, q.speed);
+        if (p.centre.distanceTo(_from) > q.r * reach) continue;
+        detach(p, _from, q.speed);
         if (cook && p.kind === 'drum') {
           fired.push(p.centre.clone());
           _queue.push({

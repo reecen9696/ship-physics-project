@@ -20,7 +20,7 @@ import { createWreck } from './wreck.js';
 import { createDamageModel, STATUS } from './damage.js';
 import { createFireSmoke } from './fx.js';
 import { createHullSpray } from '../boat/hullSpray.js';
-import { createDamageField, VOXEL } from './damageField.js';
+import { createDamageField } from './damageField.js';
 import { buildInterior, buildDeckhouseInteriors, buildFloodWater } from './interior.js';
 import { createColliders } from './colliders.js';
 import { createStructure } from './structure.js';
@@ -725,9 +725,13 @@ export function createBattleship({ shading, sunShadow }) {
         // also keeps the collision floor and the visible floor at the same
         // depth, so what a man would stand on in there is what he can see.
         //
-        // The margin is most of a voxel: the field is sampled trilinearly, so a
-        // limit cut exactly at the backing still smears half a cell past it.
-        depthLimit: Math.max(0.2, PLATING - depth - VOXEL * 0.7),
+        // The field's voxel is about as big as the chip is deep, so this cannot
+        // be exact to better than half a cell — and it does not have to be. What
+        // guarantees you never see into her is that the backing is exempt from
+        // the discard outright (see boatMaterial), not this. All this has to do
+        // is keep the *collision* volume from being hollowed deeper than the
+        // floor you can see, so that what a man would stand on is where it looks.
+        depthLimit: Math.max(0.1, PLATING * 0.6 - depth),
       });
     }
     const wound = field.addWound({

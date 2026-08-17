@@ -33,23 +33,31 @@ const S = TURRET_SPEC;
 const HOUSE_Z = -1.0; // where the gunhouse sits on the roller path (mounts.js)
 const WALL = 0.18; // liner thickness
 
+// The gunhouse is an extruded profile with a sloped face and a lower rear, so
+// the box you can fit inside it is a good deal smaller than its bounding box:
+// the roof only runs from `-l/2 + 1.0` to `l/2 - 2.6`, and a liner sized off the
+// nominal length pokes out through the face as a black slab you can see from the
+// forecastle. These numbers are cut to the *profile*, not to the dimensions.
 export const HOUSE = {
   // the room, inside the liner
   halfW: S.gunhouseW / 2 - 0.7, // 4.3
-  fwd: HOUSE_Z + S.gunhouseL / 2 - 1.7, // 3.3 — clear of the sloped face
-  aft: HOUSE_Z - S.gunhouseL / 2 + 0.7, // -6.3
+  fwd: HOUSE_Z + S.gunhouseL / 2 - 3.0, // inside where the face starts to slope
+  aft: HOUSE_Z - S.gunhouseL / 2 + 1.3, // and inside where the rear drops away
   floor: 0.2,
-  ceiling: S.gunhouseH - 0.3, // 2.4 — 2.2 m of headroom over a 1.78 m man
+  ceiling: S.gunhouseH - 0.45, // 2.55 m of headroom, and the deckhead slab still
+  // under the roof plating rather than through it
 
   // The door, one each side. It is a hole through the extruded gunhouse profile,
   // so it comes out as a doorway to port and one to starboard for free — which
   // is what a turret has, and which means the ladder can stand on whichever side
   // of her you happen to be walking down.
+  // Sized to walk through rather than to duck through: 2.33 m of clear height
+  // and 1.6 m of width, against a man 1.78 m tall and 0.68 m across.
   door: {
-    z: -3.6, // well aft of the breeches, in the working space
-    halfLen: 0.6,
-    sill: 0.15,
-    head: 2.1,
+    z: -3.2, // well aft of the breeches, in the working space
+    halfLen: 0.8,
+    sill: 0.12,
+    head: 2.45,
   },
 
   // Where the guns' breeches sit inside — the reason the middle of the room is
@@ -167,7 +175,9 @@ export function insideDoorVolumes() {
 export function landing(side) {
   const d = HOUSE.door;
   return {
-    position: new Vector3(side * (HOUSE.halfW - 0.75), HOUSE.floor + 0.02, d.z),
+    // Well clear of the volume that takes you back out — the landing and the
+    // way out have to be different places or you bounce straight back through.
+    position: new Vector3(side * (HOUSE.halfW - 1.7), HOUSE.floor + 0.02, d.z),
     heading: side < 0 ? Math.PI / 2 : -Math.PI / 2,
   };
 }
@@ -186,6 +196,9 @@ export function landing(side) {
 //
 // Returned in the SHIP's frame, at the turret's rest bearing, because the
 // bandstand does not train and neither does the deck the player is standing on.
+// These are triggers rather than geometry, so they are stated around where a
+// pair of *feet* will be rather than around the opening: a doorway tested
+// against the sole of a boot is a doorway you walk past.
 export function entryVolumes(turret, deckAt, zAt) {
   const facing = Math.abs(turret.arcCenter) > 90 ? -1 : 1; // aft-facing turrets are mirrored
   const y0 = deckAt(turret.z);
@@ -198,24 +211,24 @@ export function entryVolumes(turret, deckAt, zAt) {
     return [-1, 1].map((side) => ({
       side: side * facing,
       inBandstand: true,
-      c: new Vector3(side * (half - 0.4), y0 + (0.1 + BANDSTAND_DOOR_H) / 2, z),
-      h: new Vector3(1.3, (BANDSTAND_DOOR_H - 0.1) / 2, d.halfLen + 0.15),
+      c: new Vector3(side * (half - 0.4), y0 + 0.4, z),
+      h: new Vector3(1.3, 0.8, d.halfLen + 0.15),
       sill: y0,
     }));
   }
   // straight into the house, a metre up
-  const y = y0 + turret.deckRise;
+  const sill = y0 + turret.deckRise + d.sill;
   return [-1, 1].map((side) => ({
     side: side * facing,
     inBandstand: false,
-    c: new Vector3(side * (HOUSE.halfW + WALL + 0.45), y + (d.sill + d.head) / 2, z),
-    h: new Vector3(0.7, (d.head - d.sill) / 2, d.halfLen + 0.1),
-    sill: y + d.sill,
+    c: new Vector3(side * (HOUSE.halfW + WALL + 0.45), sill + 0.4, z),
+    h: new Vector3(0.7, 0.8, d.halfLen + 0.1),
+    sill,
   }));
 }
 
 // How tall the way through a bandstand is.
-export const BANDSTAND_DOOR_H = 2.2;
+export const BANDSTAND_DOOR_H = 2.6;
 
 // A hole in the bandstand's profile, the same trick as the gunhouse: the block
 // is extruded across the beam, so one hole gives a passage in at either side.

@@ -805,7 +805,20 @@ async function main() {
 
     emaWall = emaWall * 0.9 + dt * 1000 * 0.1;
     hudAccum += dt;
-    if (hudAccum >= 0.25 && aboard) {
+    if (hudAccum >= 0.25 && firstPerson.laying) {
+      hudAccum = 0;
+      // At the gun the sight carries its own instruments, so the corner is left
+      // to what the sight cannot show you: what the mount is actually doing.
+      const g = firstPerson.laying;
+      hud.set(
+        `${(1000 / emaWall).toFixed(0)} fps\n`
+        + `${g.id} · trained ${g.mount.yaw.toFixed(1)}° (asked ${g.lay.demandYaw.toFixed(1)}°) · `
+        + `elevation ${g.mount.elev.toFixed(1)}° (asked ${g.lay.demandElev.toFixed(1)}°)\n`
+        + `${Math.abs(g.lay.trainRate) > 0.05 ? `training ${g.lay.trainRate.toFixed(1)}°/s` : 'steady'} · `
+        + `${g.lay.reload > 0 ? `reloading ${g.lay.reload.toFixed(1)}s` : 'ready'} · `
+        + `${firstPerson.magnification} · ${ship.heel.toFixed(0)}° of heel`,
+      );
+    } else if (hudAccum >= 0.25 && aboard) {
       hudAccum = 0;
       // On foot the interesting numbers are different ones: where you are on
       // her in her own frame, and how much of her motion is reaching you.

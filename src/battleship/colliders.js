@@ -275,7 +275,10 @@ export function createColliders({
   // interior.js draws the backing at, so the floor of a chip in her is where it
   // looks like it is. It doubles as the depth a fast arrival may bury itself
   // and still be put back on top.
-  const PLATE_T = PLATING;
+  // Solid to the backing at least, and to a metre and a half whatever the
+  // backing is at: this doubles as the depth a fast arrival may bury itself in
+  // her and still be put back on top, and a shallow chip is not much of a catch.
+  const PLATE_T = Math.max(PLATING, 1.4);
   const DECK_T = 0.45; // a deck inside her, which does have two sides to it
 
   function hullHit(p, out) {

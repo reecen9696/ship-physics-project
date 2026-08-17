@@ -1,7 +1,7 @@
 import { Vector3 } from 'three/webgpu';
 import { boxHit } from '../battleship/colliders.js';
-import { SUPER, TURRETS, TURRET_SPEC } from '../battleship/spec.js';
-import { HOUSE } from '../battleship/turretHouse.js';
+import { SHIP, SUPER, TURRETS, TURRET_SPEC } from '../battleship/spec.js';
+import { HOUSE, BANDSTAND_DOOR_H } from '../battleship/turretHouse.js';
 import { deckY, zOf } from '../battleship/hull.js';
 import { deckPropSolids } from '../battleship/deckProps.js';
 import { PLAYER } from './spec.js';
@@ -34,7 +34,7 @@ const TREAD_RUN = 0.6; // m fore-and-aft per step
 // the flight is placed to overlap the deck it lands on, so there is no gap at
 // the top for a capsule to drop through.
 function flight(boxes, {
-  id, x, halfWidth, zFoot, dir, yFoot, yHead,
+  id, x, halfWidth, zFoot, dir, yFoot, yHead, landing = 0,
 }) {
   const rise = yHead - yFoot;
   const treads = Math.max(1, Math.ceil(rise / (PLAYER.stepUp - 0.03)));
@@ -45,6 +45,19 @@ function flight(boxes, {
       id,
       c: new Vector3(x, (yFoot - 1 + top) / 2, zFoot + dir * TREAD_RUN * (i - 0.5)),
       h: new Vector3(halfWidth, (top - yFoot + 1) / 2, TREAD_RUN / 2),
+    });
+  }
+  // A grating at the head of it. Without somewhere to stand at the top, the last
+  // tread is a place you arrive and immediately walk off the end of, which is
+  // exactly what happened the first time — and there is nothing to see in the
+  // trace that says so, because falling off a ladder and walking down a deck
+  // look the same from here.
+  if (landing > 0) {
+    boxes.push({
+      id,
+      c: new Vector3(x, (yFoot - 1 + yHead) / 2,
+        zFoot + dir * (TREAD_RUN * treads + landing / 2)),
+      h: new Vector3(halfWidth, (yHead - yFoot + 1) / 2, landing / 2),
     });
   }
   return boxes;
@@ -151,6 +164,41 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     });
   }
 
+  // The bandstands, as a block with a passage through them.
+  //
+  // The ship's own colliders give a superfiring turret a barbette-radius drum
+  // and nothing else, because until now the only question was what a falling
+  // mast lands on and the drum is the load-bearing part of that answer. A person
+  // walking up to B turret wants the *block* to be there, and wants the passage
+  // through it to be a passage — so here it is, in three pieces, and the barbette
+  // drum standing in the middle of it is the turret's trunk, which is exactly
+  // where a trunk goes.
+  for (const t of TURRETS) {
+    if (!t.bandstand) continue;
+    const facing = Math.abs(t.arcCenter) > 90 ? -1 : 1;
+    const w = TURRET_SPEC.barbetteR * 2.5;
+    const halfX = w / 2;
+    const halfZ = w * 1.15 / 2;
+    const y0 = deckY(t.z);
+    const zc = zOf(t.z);
+    const dz = facing * HOUSE.door.z; // the passage, in the ship's frame
+    const d = HOUSE.door.halfLen;
+    const top = y0 + t.bandstand;
+    const seg = (zMin, zMax) => boxes.push({
+      id: `${t.id}.bandstand`,
+      c: new Vector3(0, (y0 + top) / 2, zc + (zMin + zMax) / 2),
+      h: new Vector3(halfX, (top - y0) / 2, (zMax - zMin) / 2),
+    });
+    seg(-halfZ, dz - d);
+    seg(dz + d, halfZ);
+    // and the lintel over the passage
+    boxes.push({
+      id: `${t.id}.bandstand`,
+      c: new Vector3(0, (y0 + BANDSTAND_DOOR_H + top) / 2, zc + dz),
+      h: new Vector3(halfX, (top - y0 - BANDSTAND_DOOR_H) / 2, d),
+    });
+  }
+
   // Up to the doors of the turrets that stand on the deck rather than on a
   // bandstand. A and Y sit a metre off it, which is two steps; B and X are four
   // metres up and are entered through their bandstands instead, at deck level,
@@ -163,18 +211,24 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
   for (const t of TURRETS) {
     if (t.bandstand > 0) continue;
     const facing = Math.abs(t.arcCenter) > 90 ? -1 : 1;
-    const y0 = deckY(t.z);
-    const top = y0 + t.deckRise + HOUSE.door.sill;
-    if (top - y0 < PLAYER.stepUp) continue;
+    const top = deckY(t.z) + t.deckRise + HOUSE.door.sill;
+    const zFoot = zOf(t.z) + facing * (HOUSE.door.z - 1.8);
+    // The deck under the *foot of the ladder*, not under the turret. She has five
+    // metres of sheer over her forward third, so those are different numbers by
+    // most of a step, and a flight that starts from the wrong one has a first
+    // tread nobody can get onto.
+    const yFoot = deckY(zFoot / SHIP.length);
+    if (top - yFoot < PLAYER.stepUp) continue;
     for (const side of [-1, 1]) {
       flight(boxes, {
         id: `${t.id}.ladder`,
         x: side * (HOUSE.halfW + HOUSE.wall + 1.5),
         halfWidth: 1.1,
-        zFoot: zOf(t.z) + facing * (HOUSE.door.z - 1.8),
+        zFoot,
         dir: facing,
-        yFoot: y0,
+        yFoot,
         yHead: top,
+        landing: 1.3,
       });
     }
   }
