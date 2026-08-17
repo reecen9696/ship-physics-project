@@ -18,19 +18,20 @@ import { COMPARTMENTS, COMPONENT_STATS } from './spec.js';
 
 export const STATUS = { OK: 'ok', DAMAGED: 'damaged', DESTROYED: 'destroyed' };
 
-// Flooding: each hull compartment holds water. `flood` is 0..1 of its volume.
-// A compartment's share of the ship's buoyancy is lost in proportion, and its
-// centre is where that loss acts — which is what produces trim and list rather
-// than the ship just sinking evenly.
-export const FLOOD_RATE = 0.055; // fraction of a compartment per second per unit of breach
-export const PUMP_RATE = 0.012; // damage control, fraction per second
+// Flooding used to live here, as one number per compartment filling at a fixed
+// rate while a `breach` flag was set. It is in flooding.js now, because water
+// getting into a ship is a question about where the holes are, how deep each of
+// them is at this instant of her roll, and where inside her the water then
+// sits — and none of that is expressible as a fraction per compartment. What is
+// left here is what this file was always good at: components, hit points,
+// armour, fire, and what she can no longer do.
 
 export function createDamageModel({ onFlood = null } = {}) {
   const components = new Map();
 
   function add({
-    id, hp, armor = 0, group = null, damage = null, floods = false,
-    z = 0, volume = 1, critical = [], onKill = null, onDamage = null, onRepair = null,
+    id, hp, armor = 0, group = null, damage = null,
+    z = 0, critical = [], onKill = null, onDamage = null, onRepair = null,
   }) {
     const c = {
       id,
@@ -39,11 +40,7 @@ export function createDamageModel({ onFlood = null } = {}) {
       armor,
       group, // e.g. 'turret', 'aa', 'hull' — for querying "are any turrets left"
       damage, // uniform 0..1 the materials read, or null
-      floods,
       z, // fore-and-aft position, fraction of L; where its effects act
-      volume, // share of the hull's buoyant volume, for flooding
-      flood: 0,
-      breach: 0, // 0..1 how open to the sea it is; drives the flooding rate
       fire: 0, // 0..1 how hard it is burning
       status: STATUS.OK,
       critical,
@@ -59,7 +56,7 @@ export function createDamageModel({ onFlood = null } = {}) {
   // a light gun can chew up AA mounts and superstructure all day without ever
   // hurting a turret face. Returns what actually happened, so the caller can
   // decide whether to spawn a splash or an explosion.
-  function hit(id, { damage = 0, pen = 0, fire = 0, breach = 0 } = {}) {
+  function hit(id, { damage = 0, pen = 0, fire = 0 } = {}) {
     const c = components.get(id);
     if (!c || c.status === STATUS.DESTROYED) return null;
     // armour scales the damage down rather than blocking outright: a bounce
@@ -67,7 +64,6 @@ export function createDamageModel({ onFlood = null } = {}) {
     const effect = damage * Math.min(1, Math.max(0.05, (pen + 1) / (c.armor + 1)));
     c.hp = Math.max(0, c.hp - effect);
     c.fire = Math.min(1, c.fire + fire);
-    if (c.floods) c.breach = Math.min(1, c.breach + breach);
     const frac = 1 - c.hp / c.maxHp;
     if (c.damage) c.damage.value = Math.min(1, frac);
     if (c.hp <= 0) {
@@ -85,19 +81,8 @@ export function createDamageModel({ onFlood = null } = {}) {
   // structure. `effort` 0..1 scales both (a ship whose crew is dead pumps
   // nothing).
   function update(dt, effort = 1) {
-    let totalFlood = 0;
-    let totalVolume = 0;
-    let floodMomentZ = 0;
     let burning = 0;
     for (const c of components.values()) {
-      if (c.floods) {
-        const inflow = c.breach * FLOOD_RATE;
-        const pumped = c.flood > 0 ? PUMP_RATE * effort : 0;
-        c.flood = Math.min(1, Math.max(0, c.flood + (inflow - pumped) * dt));
-        totalFlood += c.flood * c.volume;
-        totalVolume += c.volume;
-        floodMomentZ += c.flood * c.volume * c.z;
-      }
       if (c.fire > 0) {
         // fire spreads a little on its own, and eats hit points while it burns
         const spread = c.status === STATUS.DESTROYED ? 0.02 : 0.008;
@@ -113,13 +98,7 @@ export function createDamageModel({ onFlood = null } = {}) {
         }
       }
     }
-    const state = {
-      // fraction of the hull's buoyant volume that is water
-      flood: totalVolume > 0 ? totalFlood / totalVolume : 0,
-      // where that water is, fore-and-aft, as a fraction of L: this is the trim
-      floodZ: totalFlood > 0 ? floodMomentZ / totalFlood : 0,
-      burning,
-    };
+    const state = { burning };
     if (onFlood) onFlood(state);
     return state;
   }
@@ -163,8 +142,6 @@ export function createDamageModel({ onFlood = null } = {}) {
   function repair() {
     for (const c of components.values()) {
       c.hp = c.maxHp;
-      c.flood = 0;
-      c.breach = 0;
       c.fire = 0;
       c.status = STATUS.OK;
       if (c.damage) c.damage.value = 0;

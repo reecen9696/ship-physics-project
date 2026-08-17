@@ -7,8 +7,10 @@ import { pushScuttle } from './scuttles.js';
 import { SHIP, SUPER, HULL_NUMBER } from './spec.js';
 import { deckY, zOf, sideAt, STEEL, STEEL_DARK } from './hull.js';
 import { buildHullNumber } from './hullNumber.js';
-
-const UP = new Vector3(0, 1, 0);
+import {
+  strut, createRig, latticeMast, yardarm, topmast, aerialWire,
+  airSearchArray, surfaceSearchDish, RIG,
+} from './aerials.js';
 
 // Each builder returns { id, object, damage } where `damage` is the uniform
 // its materials share. Anything that should die as one thing (the pagoda, the
@@ -30,15 +32,6 @@ function unit(id, materials) {
   const object = new Group();
   object.name = id;
   return { id, object, damage, mk, mkGlass, slot, materials };
-}
-
-// a horizontal cylinder from a to b (masts, yards, derricks, chain)
-function strut(a, b, r, make, segs = 8) {
-  const d = new Vector3().subVectors(b, a);
-  const m = make(new CylinderGeometry(r, r, d.length(), segs));
-  m.position.copy(a).add(b).multiplyScalar(0.5);
-  m.quaternion.setFromUnitVectors(UP, d.clone().normalize());
-  return m;
 }
 
 // --- pagoda bridge -----------------------------------------------------------
@@ -195,7 +188,7 @@ export function buildBridge({ materials }) {
   platform(4.2, 26.5, 0.4);
   house(5.6, 3.0, 5.4, 27.1, 0.4); // fire-control tower
 
-  // --- top: director drum, rangefinder, pole mast ---------------------------
+  // --- top: director drum, rangefinder, and the rig above them ---------------
   const topY = 30.1;
   const drum = dark(new CylinderGeometry(2.3, 2.6, 2.4, 16));
   drum.position.set(0, y0 + topY + 1.2, z0 + 0.4);
@@ -210,14 +203,70 @@ export function buildBridge({ materials }) {
     hood.position.set(side * 6.5, y0 + topY + 3.0, z0 + 0.8);
     g.add(hood);
   }
-  // pole topmast with a single yard
-  const pole = dark(new CylinderGeometry(0.14, 0.26, 11, 8));
-  pole.position.set(0, y0 + topY + 9.0, z0 - 1.2);
-  g.add(pole);
-  g.add(strut(
-    new Vector3(-4.5, y0 + topY + 12.0, z0 - 1.2),
-    new Vector3(4.5, y0 + topY + 12.0, z0 - 1.2), 0.11, dark,
-  ));
+
+  // --- the foremast rig ------------------------------------------------------
+  // Above the director there is no more ship, only aerial. What was here was a
+  // tapered pole with one bar across it, which is a flagstaff: solid, closed,
+  // and nothing like the open lattice, combed yard and radar platforms that
+  // make a warship's masthead. All of that is built in aerials.js and merged
+  // into a single buffer, because it takes a hundred-odd thin members and one
+  // draw call is what makes a hundred members affordable.
+  const rig = createRig(u.slot);
+  const foot = new Vector3(0, y0 + topY, z0 - 1.0); // on the fire-control house roof
+  const head = latticeMast(rig, {
+    x: foot.x, z: foot.z, y0: foot.y, height: 12.0, base: 1.7, top: 0.8, bays: 6,
+  });
+  // the signal yard, combed with whip aerials, low enough to be worked from the
+  // platform below it
+  const yard = yardarm(rig, { y: y0 + topY + 9.0, z: foot.z, span: 7.6, whips: 8 });
+  // and the topmast proper: the slim pole with the stacked dipoles on it, which
+  // is the highest thing in the ship
+  const truck = topmast(rig, { at: head, height: 7.5, stacks: 5 });
+  // aerial wires: down from under the truck to each yard tip, and on down to
+  // the top of the pagoda. Rigging, not structure — hair-thin on purpose.
+  const trunk = truck.clone().setY(truck.y - 1.4);
+  aerialWire(rig, trunk, yard.port);
+  aerialWire(rig, trunk, yard.stbd);
+  aerialWire(rig, yard.port, new Vector3(-1.7, y0 + topY + 0.6, z0 - 2.1));
+  aerialWire(rig, yard.stbd, new Vector3(1.7, y0 + topY + 0.6, z0 - 2.1));
+  g.add(rig.mesh(u.materials.body));
+
+  // platform at the masthead, under the topmast's foot
+  const headPlat = steel(new CylinderGeometry(1.9, 1.9, 0.24, 16));
+  headPlat.position.set(0, head.y - 0.12, foot.z);
+  g.add(headPlat);
+  railRing(1.7, topY + 12.0, -1.0, 12);
+
+  // The surface-search set, on a platform bracketed out forward of the mast.
+  //
+  // Where it stands is not a matter of taste: a reflector two metres across
+  // that turns all the way round has to have two metres of nothing all the way
+  // round it, which rules out the lattice, rules out the yard, and — the one
+  // that is easy to miss — rules out the whole height of the armoured column,
+  // whose head is at topY + 7.8. So the platform is above that and well
+  // forward, which is exactly where the real ones hang.
+  const DISH_Y = topY + 8.6;
+  const DISH_Z = 3.0;
+  const dishPlat = steel(new CylinderGeometry(2.0, 2.0, 0.24, 16));
+  dishPlat.position.set(0, y0 + DISH_Y, z0 + DISH_Z);
+  g.add(dishPlat);
+  railRing(1.8, DISH_Y + 0.12, DISH_Z, 12);
+  for (const sx of [-1, 1]) {
+    g.add(strut(
+      new Vector3(sx * 0.8, y0 + topY + 5.4, z0 - 0.9),
+      new Vector3(sx * 1.6, y0 + DISH_Y - 0.15, z0 + DISH_Z + 1.4), 0.1, dark,
+    ));
+    g.add(strut(
+      new Vector3(sx * 0.8, y0 + DISH_Y - 0.15, z0 + DISH_Z - 1.4),
+      new Vector3(sx * 1.6, y0 + DISH_Y - 0.15, z0 + DISH_Z + 1.4), 0.09, dark,
+    ));
+  }
+  const dish = surfaceSearchDish({ slot: u.slot, material: u.materials.body, r: 1.33 });
+  dish.position.set(0, y0 + DISH_Y + 0.05, z0 + DISH_Z); // pedestal foot on the platform
+  g.add(dish);
+  // A radar that has stopped turning is a dead radar, so she sweeps as long as
+  // the bridge is alive and freezes where she stands when it is not.
+  u.tick = (dt) => { if (u.damage.value < 0.999) dish.rotation.y += dt * 0.98; };
 
   // --- things hung off the column: searchlights and bridge wings ------------
   for (const side of [-1, 1]) {
@@ -311,18 +360,43 @@ export function buildMainmast({ materials }) {
   g.add(strut(new Vector3(0, y0, z0 + M.spread * 0.9), top, 0.32, dark));
   g.add(strut(new Vector3(-M.spread * 0.7, y0, z0 - M.spread * 0.55), top, 0.28, dark));
   g.add(strut(new Vector3(M.spread * 0.7, y0, z0 - M.spread * 0.55), top, 0.28, dark));
-  // spotting top and pole
+  // spotting top
   const spot = steel(new BoxGeometry(4.5, 2.2, 3.5));
   spot.position.copy(top).add(new Vector3(0, 1.1, 0));
   g.add(spot);
-  const pole = dark(new CylinderGeometry(0.12, 0.22, M.h * 0.32, 8));
-  pole.position.copy(top).add(new Vector3(0, M.h * 0.16 + 2.2, 0));
-  g.add(pole);
-  g.add(strut(new Vector3(-6, top.y + 4.5, z0), new Vector3(6, top.y + 4.5, z0), 0.1, dark));
   // searchlight platform halfway up
   const plat = steel(new CylinderGeometry(3.2, 3.2, 0.3, 16));
   plat.position.set(0, y0 + M.h * 0.38, z0);
   g.add(plat);
+
+  // --- the mainmast rig ------------------------------------------------------
+  // A lattice topmast off the spotting top's roof, its own combed yard, and the
+  // air-search array at the head of it. The array is the one thing up here that
+  // has to be at the top of something: it is seven metres across and it turns,
+  // so anything standing beside it is something it would hit.
+  const rig = createRig(u.slot);
+  const foot = new Vector3(0, top.y + 2.2, z0); // the spotting top's roof
+  const head = latticeMast(rig, {
+    z: z0, y0: foot.y, height: 8.0, base: 1.3, top: 0.6, bays: 4,
+  });
+  const yard = yardarm(rig, { y: foot.y + 2.8, z: z0, span: 5.4, whips: 6, whipH: 1.6 });
+  aerialWire(rig, new Vector3(0, head.y - 0.6, z0), yard.port);
+  aerialWire(rig, new Vector3(0, head.y - 0.6, z0), yard.stbd);
+  // the gaff, raked aft off the mast: where the ensign flies under way
+  rig.tube(
+    new Vector3(0, foot.y + 1.0, z0 - 0.6),
+    new Vector3(0, foot.y + 5.2, z0 - 4.4), 0.085, RIG, 0.42, 5,
+  );
+  g.add(rig.mesh(materials.body));
+
+  const headPlat = steel(new CylinderGeometry(1.5, 1.5, 0.22, 14));
+  headPlat.position.set(0, head.y - 0.11, z0);
+  g.add(headPlat);
+
+  const array = airSearchArray({ slot: u.slot, material: materials.body });
+  array.position.set(0, head.y + 2.6, z0);
+  g.add(array);
+  u.tick = (dt) => { if (u.damage.value < 0.999) array.rotation.y += dt * 0.62; };
   return u;
 }
 

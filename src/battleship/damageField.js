@@ -84,6 +84,12 @@ export function createDamageField({
   // the backend only duck-types them — see WebGPUTextureUtils.updateTexture.
   texture.layerUpdates = new Set();
   texture.clearLayerUpdates = () => texture.layerUpdates.clear();
+  // Upload the empty volume once, up front. Without this an undamaged ship
+  // never flushes — `flush` has nothing dirty to write — so the texture stays at
+  // version 0, three substitutes its default 1x1 *2D* white for the binding, and
+  // the `texture3D` fetch in the ship's shader fails WebGPU validation with a
+  // dimension mismatch before a single shell has been fired.
+  texture.needsUpdate = true;
 
   const origin = uniform(min.clone());
   const invSize = uniform(new Vector3(1 / size.x, 1 / size.y, 1 / size.z));

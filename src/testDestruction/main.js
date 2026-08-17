@@ -173,7 +173,11 @@ async function main() {
   });
   scene.add(ship.group);
   scene.add(battleship.fx.mesh);
-  scene.add(battleship.debris.group);
+  // Everything that has left her lives in world space, so it goes in the scene
+  // rather than under the hull: whole pieces of ship under `wreck`, the plate
+  // thrown off a burst under `shards`, and the water either of them puts up.
+  scene.add(battleship.wreck.group);
+  scene.add(battleship.shards.mesh);
   scene.add(battleship.splash.mesh);
   const shipSea = { height: 0, slopeX: 0, slopeZ: 0, originX: 0, originZ: 0 };
   registerHull(battleship.hull, { width: 3.5, strength: 1, wakeSeconds: 2.0, water: shipWater });
@@ -200,37 +204,36 @@ async function main() {
   });
 
   const _up = new Vector3(0, 1, 0);
-  const _n = new Vector3();
+  const _dir = new Vector3();
 
-  function onHit({ point, object, shell, speed }) {
+  // The rig does not damage the ship itself. It resolves *what* was hit and
+  // hands the shell to `battleship.strike`, which is the one door every
+  // damaging event on this ship comes through — the crater in the field, the
+  // structure the crater ate, the hole it opened to the sea and the burst off
+  // it are all on the far side of that call. Doing any of it here would give
+  // this page a destruction model of its own that the sim page did not have.
+  function onHit({ point, object, shell }) {
     const { id, component, direct, part } = hitMap.resolve(object, point);
     if (!component) return;
     const before = component.hp;
     const t = shell.type;
-    const result = battleship.damage.hit(id, {
-      damage: t.damage, pen: t.pen, fire: t.fire, breach: t.breach,
+
+    // The direction matters: `strike` pushes the crater in along the shell's
+    // path, because a burst *behind* the plating takes a disc of it away and a
+    // burst on the outside of it only scoops.
+    _dir.copy(shell.vel).normalize();
+    const { result } = battleship.strike({
+      point,
+      dir: _dir,
+      kind: t.key, // AP / HE / TORP — the same keys the wound table uses
+      componentId: id,
+      damage: t.damage,
+      pen: t.pen,
+      fire: t.fire,
+      breach: t.breach,
     });
 
-    // The burst: flame first and brief, then a much larger volume of smoke that
-    // hangs about. Scaled by what actually got through the armour, so a bounce
-    // off a turret face looks like a bounce.
     const took = result ? result.effect : 0;
-    const bite = Math.min(1.5, took / Math.max(1, t.damage) + 0.25);
-    battleship.fx.emit(point, Math.round(18 * bite), {
-      kind: 1, rise: 10, spread: 2.6, size: 2.8 * bite, life: 0.9, grow: 1.8,
-    });
-    battleship.fx.emit(point, Math.round(30 * bite), {
-      kind: 0, rise: 6, spread: 3.4, size: 3.2 * bite, life: 5.5, grow: 2.6,
-    });
-    // spray off the impact, thrown back the way the shell came and biased
-    // upward — the face normal comes back in the hit mesh's own frame and would
-    // have to be rotated into the world before it meant anything
-    _n.copy(shell.vel).normalize().negate();
-    _n.y = Math.abs(_n.y) + 0.6;
-    battleship.splash.burst(point, _n.normalize(), Math.min(3 + speed * 0.02, 9), 40, {
-      spread: 1.2, size: 0.4, life: 1.1,
-    });
-
     const tag = direct ? id : `${part} → ${id}`;
     const dead = result && result.destroyed;
     readout.logHit(
@@ -294,16 +297,25 @@ async function main() {
   addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k >= '1' && k <= String(SHELL_TYPES.length)) shellType = SHELL_TYPES[Number(k) - 1];
-    else if (k === 'r') { battleship.damage.repair(); gunnery.clear(); battleship.fx.clear(); ship.reset(); }
+    else if (k === 'r') { battleship.repair(); gunnery.clear(); battleship.fx.clear(); ship.reset(); }
     else if (k === 'v') setView(view + 1);
     else if (k === 'p') dcEffort = dcEffort > 0 ? 0 : 1;
     else if (k === 'n') { night = !night; setTimeOfDay(night ? 0 : 1); }
     else if (k === 'x') {
       // open every compartment to the sea, to watch her go down without having
       // to shoot the waterline apart first
-      for (const cpt of COMPARTMENTS) battleship.damage.get(cpt.id).breach = 1;
+      battleship.flooding.scuttle();
     } else if (k === 'k') {
       for (const t of battleship.turrets) battleship.damage.hit(t.id, { damage: 1e6, pen: 999 });
+    } else if (k === 'm' || k === 'b') {
+      // Break the funnel and the mainmast without having to hit them, at the
+      // height the key says — `m` two-thirds up (the top comes off, the stump
+      // stays and keeps belching), `b` at the foot (the whole thing goes over).
+      // This is the one behaviour of the structure model that is tedious to
+      // reach with the mouse and the thing most worth watching.
+      const frac = k === 'm' ? 0.66 : 0.02;
+      battleship.structure.breakAt('funnel', frac);
+      battleship.structure.breakAt('mainmast', frac);
     }
   });
 
@@ -363,6 +375,9 @@ async function main() {
       wind: trueWind,
       sea: shipSea,
       dcEffort,
+      // wreckage resting on her decks has to be shed over the side when she
+      // heels far enough, which it can only know from her
+      heel: ship.heel,
     });
 
     // Shells fly against the ship as she is drawn *this* frame, and the ship's
@@ -400,10 +415,13 @@ async function main() {
         + `(dmg ${shellType.damage} · pen ${shellType.pen} · fire ${shellType.fire} · breach ${shellType.breach})\n`
         + `heel ${ship.heel.toFixed(1)}° · trim ${ship.trim.toFixed(1)}° · draft ${ship.state.submerged.toFixed(2)} m`
         + ` · damage control ${dcEffort ? 'ON' : 'OFF'}\n`
+        + `${battleship.state.holes} holes · ${Math.round(battleship.state.tons)} t of water`
+        + ` · ${battleship.wreck.count} pieces off her${battleship.state.foundered ? ' · FOUNDERED' : ''}\n`
         + `\n`
         + `CLICK to fire at the ship · DRAG to orbit\n`
         + `${SHELL_TYPES.map((t, i) => `${i + 1} = ${t.key}`).join(' · ')}\n`
-        + `R = repair all · X = breach every compartment · K = kill all turrets\n`
+        + `R = repair all · X = open her to the sea · K = kill all turrets\n`
+        + `M = break funnel/mast two-thirds up · B = break them at the foot\n`
         + `P = damage control on/off · V = view (${VIEWS[view].name}) · N = ${night ? 'day' : 'night'}`,
       );
     }

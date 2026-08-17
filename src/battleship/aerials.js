@@ -233,8 +233,16 @@ export function airSearchArray({ slot, material, width = 7.4, height = 2.9, rows
 // concave face — rather than the one-sided shell a lathe gives you by default.
 // A shell disappears the instant you look at its back, which on something that
 // turns is every few seconds.
-export function surfaceSearchDish({ slot, material, r = 1.9, depth = 0.62, thick = 0.09 }) {
+//
+// `r` is the only size knob: the bowl's depth, the focal length, the yoke and
+// the pedestal are all quoted as multiples of it, so asking for a smaller set
+// gives you a smaller set rather than a small reflector on full-size mountings.
+// The returned pivot's origin is the *foot* of the pedestal, so the caller
+// seats it on a platform without having to know how tall the mounting is.
+export function surfaceSearchDish({ slot, material, r = 1.9 }) {
   const rig = createRig(slot);
+  const depth = r * 0.326; // how dished the reflector is
+  const thick = r * 0.047; // the plating it is pressed from
   const N = 9;
   const pts = [];
   for (let i = 0; i <= N; i++) { const t = i / N; pts.push(new Vector2(r * t, depth * t * t - thick)); }
@@ -245,19 +253,31 @@ export function surfaceSearchDish({ slot, material, r = 1.9, depth = 0.62, thick
 
   // feed horn at the focus, on the three legs that hold it there
   const focus = new Vector3(0, 0, r * r / (4 * depth) * 0.55);
-  rig.box(0.34, 0.34, 0.6, focus, AERIAL, 0.5);
+  rig.box(r * 0.18, r * 0.18, r * 0.32, focus, AERIAL, 0.5);
   for (let k = 0; k < 3; k++) {
     const a = (k / 3) * Math.PI * 2;
     rig.tube(
       new Vector3(Math.cos(a) * r * 0.82, Math.sin(a) * r * 0.82, depth * 0.68),
-      focus, 0.035, AERIAL, 0.55, 3,
+      focus, r * 0.018, AERIAL, 0.55, 3,
     );
   }
   // trunnion yoke and the pedestal it turns on
-  for (const s of [-1, 1]) rig.tube(new Vector3(s * r * 0.8, 0, -0.1), new Vector3(s * 0.45, -1.0, -0.35), 0.07, RIG, 0.45, 5);
-  rig.tube(new Vector3(0, -1.7, -0.35), new Vector3(0, -0.95, -0.35), 0.24, RIG, 0.45, 8);
+  const foot = r * 0.9; // how far the mounting drops below the reflector's axis
+  for (const s of [-1, 1]) {
+    rig.tube(
+      new Vector3(s * r * 0.8, 0, -r * 0.05),
+      new Vector3(s * r * 0.24, -foot * 0.59, -r * 0.18), r * 0.037, RIG, 0.45, 5,
+    );
+  }
+  rig.tube(
+    new Vector3(0, -foot, -r * 0.18),
+    new Vector3(0, -foot * 0.56, -r * 0.18), r * 0.126, RIG, 0.45, 8,
+  );
 
+  // lifted so the pivot's origin is the pedestal foot, not the reflector's axis
   const pivot = new Group();
-  pivot.add(rig.mesh(material));
+  const mesh = rig.mesh(material);
+  mesh.position.y = foot;
+  pivot.add(mesh);
   return pivot;
 }

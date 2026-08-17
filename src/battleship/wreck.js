@@ -69,7 +69,21 @@ const _hit = { normal: new Vector3(), id: null };
 // face centres: fourteen is enough to keep a long thin thing from pivoting
 // through a deck, and few enough that the whole contact solve is free.
 function samplePoints(object) {
+  // The box has to be in the object's *own* frame, because that is the frame
+  // the contact points are stored in. `setFromObject` reports world space, so
+  // the object is unhooked and flattened for the measurement and put back.
+  const parent = object.parent;
+  const px = object.position.clone();
+  const pq = object.quaternion.clone();
+  if (parent) parent.remove(object);
+  object.position.set(0, 0, 0);
+  object.quaternion.identity();
+  object.updateMatrixWorld(true);
   _box.setFromObject(object, true);
+  object.position.copy(px);
+  object.quaternion.copy(pq);
+  if (parent) parent.add(object);
+  object.updateMatrixWorld(true);
   const c = _box.getCenter(new Vector3());
   const h = _box.getSize(new Vector3()).multiplyScalar(0.5);
   const pts = [];
@@ -130,8 +144,11 @@ function boxInertia(mass, h) {
 }
 
 export function createWreck({
-  material, max = 26, colliders = null, onSplash = null, onImpact = null,
+  material, max = 26, colliders: colliders0 = null, onSplash = null, onImpact = null,
 }) {
+  // The colliders are built from the mounts, and the mounts are built after
+  // this is, so they are wired in afterwards rather than passed in.
+  let colliders = colliders0;
   const group = new Group();
   group.name = 'ship.wreck';
   group.frustumCulled = false;
@@ -426,9 +443,16 @@ export function createWreck({
         }
       }
 
-      // the sea ends everything
+      // the sea ends everything. The lowest of the body's own contact points is
+      // what touches it, not its centre — a mast falling flat goes in along its
+      // whole length at once, and a mast falling end-on does not.
+      let low = Infinity;
+      for (let k = 0; k < b.pts.length; k++) {
+        _v.copy(b.pts[k]).applyQuaternion(b.object.quaternion);
+        if (_v.y < low) low = _v.y;
+      }
+      low += b.object.position.y;
       const wy = seaY(sea, b.object.position.x, b.object.position.z);
-      const low = b.object.position.y + b.com.y - b.half.y;
       if (low <= wy) {
         b.object.position.y += wy - low;
         if (onSplash) onSplash(b.object.position, Math.abs(b.vel.y), b.mass);
@@ -465,6 +489,7 @@ export function createWreck({
     update,
     clear,
     disturb,
+    setColliders(c) { colliders = c; },
     ship,
     bodies,
     get count() { return bodies.length; },

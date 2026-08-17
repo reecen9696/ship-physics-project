@@ -38,6 +38,9 @@ import { SHIP, COMPARTMENTS } from './spec.js';
 // whatever height the flooding model has filled it to.
 
 const PLATE = 0.22; // how far the liner stands inside the skin, m
+// How far in from the stem and the stern the end bulkheads stand, as a fraction
+// of her length — far enough not to share a plane with the hull's own end caps.
+const END_BULKHEAD = 0.014; // ~2.5 m
 const NR = 23; // rings round a section — the same as the hull loft
 
 // --- geometry helpers --------------------------------------------------------
@@ -63,16 +66,29 @@ function twoSided(pos, idx) {
   return g;
 }
 
-// A horizontal slab inside the hull, between two stations, clipped to the
-// hull's own half-breadth at its height. This is what a deck is: a floor that
-// meets the shell, so its edge has to follow the section curve or you can see
-// daylight between it and the plating.
-function deckSlab(s0, s1, y, inset = 0.35) {
-  const steps = Math.max(3, Math.round((s1 - s0) * 34));
+// A deck inside the hull, between two stations, clipped to the hull's own
+// half-breadth at its height.
+//
+// `yAt` is a *function* of the station, and it has to be. Take one height for
+// the whole compartment — the height amidships, say — and the sheer will put
+// the slab straight through the weather deck at the forward end of it: this
+// hull's deck line rises five metres over her forward third, so a flat slab
+// under the middle of the bow compartment stands a metre proud of the plank
+// deck at its after end. What that looks like is a black rectangle laid across
+// her forecastle, and it is worse than it sounds, because `sideAt` given a
+// height above the sheer returns the *full* beam — so the rectangle runs right
+// out to the deck edge on both sides.
+//
+// An interior deck follows the same curves the hull was lofted from, at a fixed
+// distance under the deck above it or over the keel below it. Then it cannot
+// escape, by construction, at any station.
+function deckSlab(s0, s1, yAt, inset = 0.35) {
+  const steps = Math.max(4, Math.round((s1 - s0) * 46));
   const pos = [];
   const idx = [];
   for (let i = 0; i <= steps; i++) {
     const s = s0 + ((s1 - s0) * i) / steps;
+    const y = yAt(s);
     const half = Math.max(sideAt(s, y) - inset, 0.2);
     const z = (s - 0.5) * SHIP.length;
     pos.push(-half, y, z, half, y, z);
@@ -85,7 +101,13 @@ function deckSlab(s0, s1, y, inset = 0.35) {
 }
 
 // A transverse wall filling the section at a station, from the keel to the deck.
-function bulkhead(s, inset = 0.25) {
+//
+// `inset` is deliberately larger than the liner's own plate thickness: the wall
+// has to finish clearly *inside* the shell, not on it. Land the two within a
+// couple of centimetres of each other and the depth buffer cannot separate
+// them, which shows up as the two surfaces flickering against each other along
+// the turn of the bilge.
+function bulkhead(s, inset = 0.38) {
   const z = (s - 0.5) * SHIP.length;
   const top = deckAt(s) - 0.1;
   const bot = -keelAt(s) + 0.3;
@@ -171,22 +193,37 @@ export function buildInterior({ materials }) {
 
     add(linerSkin(cpt.s));
 
-    // Decks. Two of them: an inner bottom well down in the hull, and a lower
-    // deck a little above the waterline. Between them is where the water you
-    // can see through a hole in her side actually is.
-    const mid = (cpt.s[0] + cpt.s[1]) / 2;
-    const top = deckAt(mid);
-    const bot = -keelAt(mid);
-    add(deckSlab(cpt.s[0], cpt.s[1], bot + 1.6));
-    add(deckSlab(cpt.s[0], cpt.s[1], top - 3.4));
-    // and the deckhead: the underside of the weather deck, so looking up
-    // through a hole in the side does not show the sky
-    add(deckSlab(cpt.s[0], cpt.s[1], top - 0.3, 0.15));
+    // Decks. Three of them, and every one measured off the hull's own curves at
+    // its own station rather than off a single height for the whole compartment
+    // — see the note on `deckSlab` for what that costs.
+    //
+    //   * an inner bottom riding over the keel, which is the floor of the space
+    //     the water you can see through a hole is standing in
+    //   * a lower deck a little above the waterline
+    //   * the deckhead: the underside of the weather deck, so that looking up
+    //     through a hole in her side shows you a deck and not the sky
+    //
+    // The inner bottom follows the keel and the other two follow the sheer,
+    // which is what they do on a ship: the tank top is parallel to the bottom
+    // and the decks are parallel to each other.
+    add(deckSlab(cpt.s[0], cpt.s[1], (s) => -keelAt(s) + 1.6));
+    add(deckSlab(cpt.s[0], cpt.s[1], (s) => deckAt(s) - 3.4));
+    add(deckSlab(cpt.s[0], cpt.s[1], (s) => deckAt(s) - 0.4, 0.15));
 
-    // The bulkheads that make it a compartment rather than a tube. Only the
-    // forward one of each, so neighbours share a wall.
-    add(bulkhead(cpt.s[0]));
-    if (cpt === COMPARTMENTS[COMPARTMENTS.length - 1]) add(bulkhead(cpt.s[1]));
+    // The bulkheads that make this a compartment rather than a length of tube.
+    // Only the after one of each, so neighbours share a wall.
+    //
+    // The two on the very ends are pulled inboard a couple of metres. At station
+    // 0 and station 1 the hull closes itself — the loft fans a cap across the
+    // stern and another across the stem — so a bulkhead put there is a second
+    // surface in the same plane as the first, and the depth buffer cannot
+    // choose between them: what you see is a ragged black patch flickering
+    // across her transom. Standing it two metres in gives it somewhere of its
+    // own to be, and gives a shell that opens her counter something to find.
+    add(bulkhead(Math.max(cpt.s[0], END_BULKHEAD)));
+    if (cpt === COMPARTMENTS[COMPARTMENTS.length - 1]) {
+      add(bulkhead(Math.min(cpt.s[1], 1 - END_BULKHEAD)));
+    }
 
     // One draw call per compartment for the whole of its insides.
     const mesh = new Mesh(merge(geoms), materials.body);

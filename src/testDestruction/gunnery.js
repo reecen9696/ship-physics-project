@@ -39,17 +39,21 @@ export function aimWithDrop(direction, range, speed, out) {
 // Shell types. `pen` is what the damage model subtracts armour from, so AP is
 // the only thing that hurts a turret face and HE is what strips her fittings,
 // starts fires and opens her up to the sea.
+// `wound` names the entry in WOUNDS (spec.js) that says how big a crater this
+// tears, how wide it burns and how much of a hole it leaves for the sea — so
+// the look of a hit, the structure it breaks and the water it lets in all come
+// off one description rather than three.
 export const SHELL_TYPES = [
   {
-    key: 'AP', name: 'armour piercing', color: 0xffe9a8,
-    damage: 110, pen: 26, fire: 0.05, breach: 0.15, speed: 320, radius: 0.55,
+    key: 'AP', name: 'armour piercing', color: 0xffe9a8, wound: 'AP',
+    damage: 110, pen: 26, fire: 0.05, breach: 1.0, speed: 320, radius: 0.55,
   },
   {
-    key: 'HE', name: 'high explosive', color: 0xff8a4a,
-    damage: 70, pen: 6, fire: 0.45, breach: 0.35, speed: 300, radius: 0.55,
+    key: 'HE', name: 'high explosive', color: 0xff8a4a, wound: 'HE',
+    damage: 70, pen: 6, fire: 0.45, breach: 1.0, speed: 300, radius: 0.55,
   },
   {
-    key: 'TORP', name: 'torpedo', color: 0x7fd4ff,
+    key: 'TORP', name: 'torpedo', color: 0x7fd4ff, wound: 'TORP',
     damage: 220, pen: 10, fire: 0.15, breach: 1.0, speed: 90, radius: 0.8,
   },
 ];

@@ -181,7 +181,7 @@ export function createGUI(params, {
         }
       },
     }, 'flood').name('torpedo forward');
-    d.add({ repair: () => battleship.damage.repair() }, 'repair').name('repair everything');
+    d.add({ repair: () => battleship.repair() }, 'repair').name('repair everything');
 
     // Guardrails: they come off with the hull section under them, but they are
     // also the thing a near miss takes away on its own, so there is a way to do

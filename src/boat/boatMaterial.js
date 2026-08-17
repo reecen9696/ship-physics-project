@@ -220,6 +220,20 @@ export function createBoatMaterial({
       return saturate(float(1.4).sub(w));
     };
 
+    // The other way to fade detail: by distance to the eye, in metres.
+    //
+    // `aaFade` is the better measure where it works, but `fwidth` is a
+    // derivative of a value interpolated across a triangle — near-constant
+    // within one and discontinuous at every edge where the surface turns. On a
+    // flat panel that is invisible; on the hull, which is a loft two metres to
+    // a station and curving the whole way, each triangle gets its own fade and
+    // the mesh itself appears on her side as a lattice of faint diagonal
+    // creases. Distance is smooth everywhere. The cost is that the ranges are
+    // metres tuned by eye rather than pixels measured, so they do not follow a
+    // change of resolution.
+    const eye = length(cameraPosition.sub(positionWorld)).toVar();
+    const upTo = (near, far) => saturate(float(far).sub(eye).div(far - near));
+
     // TSL's `hash` converts its seed to a uint, and a negative float converted
     // to a uint is zero — so every seed to port of the centreline hashes to the
     // same number. On a deck that showed up as a hard line down the middle of
@@ -228,6 +242,25 @@ export function createBoatMaterial({
     // any seed this file makes (the widest is the half-beam in plank widths,
     // about 100) and small enough to stay exact in a float32.
     const phash = (seed) => hash(float(seed).add(8192));
+
+    // Blotches in three dimensions, hashed from the cell a fragment falls in.
+    //
+    // The thing to avoid here is hashing a *continuous* combination of the
+    // coordinates. `hash(x*a + y*b + z*c)` looks like a 3D hash and is not: its
+    // argument is constant across every plane perpendicular to (a, b, c), so
+    // what it draws on a surface is a set of parallel stripes at whatever angle
+    // that plane cuts it — and two of them multiplied together is a lattice of
+    // diagonals lying across the ship at a fixed angle, which is what the
+    // scorch used to do. Taking `floor` first is the whole fix: each cell gets
+    // one value, neighbouring cells are unrelated, and the pattern has no
+    // direction of its own.
+    const cellNoise = (scale, k) => {
+      const c = floor(positionLocal.mul(scale)).toVar();
+      // wrapped into a small block so the seed stays exact in a float32 at any
+      // point on a 180 m ship; the repeat is far too coarse to read as tiling
+      const w = c.sub(floor(c.div(97)).mul(97));
+      return phash(w.x.mul(k).add(w.y.mul(k * 37.1)).add(w.z.mul(k * 91.7)));
+    };
 
     // --- planking -------------------------------------------------------------
     //
@@ -329,16 +362,15 @@ export function createBoatMaterial({
     if (grain > 0) {
       // Fine break-up so large painted areas are not perfectly uniform.
       //
-      // The coordinate is wrapped into a small repeating cell before it is
-      // hashed. Multiplying a raw local position by a few hundred is fine on a
-      // 16 m hull and wrong on a 180 m one: the product lands where float32
-      // steps are coarser than the distance between neighbouring fragments, so
-      // the hash returns garbage that changes with the viewing angle rather
-      // than a fixed pattern on the surface. Wrapping keeps the input small and
-      // exactly representable, and the repeat is far too fine to read as tiling.
+      // `cellNoise` handles both of the traps here: it hashes the *cell* rather
+      // than a continuous combination of the coordinates, so the result is
+      // grain rather than the stripes a plane equation draws, and it wraps the
+      // seed into a small block first, so a position a hundred metres down the
+      // ship still lands where float32 steps are finer than the distance
+      // between neighbouring fragments. Multiplying a raw local position by a
+      // few hundred is fine on a 16 m hull and returns garbage on a 180 m one.
       const q = positionLocal.mul(3.7); // ~27 cm features
-      const cell = q.sub(floor(q.div(53)).mul(53));
-      const g = hash(cell.x.add(cell.y.mul(57.3)).add(cell.z.mul(113.7)));
+      const g = cellNoise(3.7, 2.3);
       const amount = float(grain).mul(aaFade(q.x.add(q.y).add(q.z), 1)).mul(fx.hullGrain.u);
       base.assign(base.mul(float(1).sub(amount.mul(0.5)).add(g.mul(amount))));
     }
@@ -394,29 +426,12 @@ export function createBoatMaterial({
       const offZ = qz.sub(sgn(qz)).mul(P.butt * 0.5).toVar();
 
       // Each term fades on its own — the seams outlast the rivets by a long
-      // way — and all three fade with *distance to the eye*, not with `aaFade`.
-      //
-      // That is a deliberate exception to the rule the rest of this file
-      // follows, and it is worth saying why. `aaFade` measures a feature in
-      // pixels with `fwidth`, which is a screen-space derivative of a value
-      // interpolated across a triangle: it is very nearly constant within one
-      // triangle and it *jumps* at every edge where the surface changes
-      // orientation. On a flat panel that is invisible. On the hull — a loft
-      // two metres to a station, curving the whole way — every triangle gets
-      // its own fade value, and the plating is drawn at a slightly different
-      // strength in each one. The result is that the hull's own triangulation
-      // appears on her side as a lattice of faint diagonal creases, which is
-      // exactly the artefact this replaced.
-      //
-      // Distance is smooth everywhere, so nothing can print the mesh onto the
-      // paint. The ranges are metres, tuned by eye at the usual render scale;
-      // they are not resolution-independent the way a derivative would be, and
-      // that is the price.
-      const eye = length(cameraPosition.sub(positionWorld)).toVar();
-      const upTo = (near, far) => saturate(float(far).sub(eye).div(far - near)).mul(gate);
-      const fadePlate = upTo(200, 420).toVar(); // 2 m features
-      const fadeSeam = upTo(70, 150).toVar(); // 4 cm lines, but continuous
-      const fadeRivet = upTo(16, 34).toVar(); // 5 cm domes: gone by a ship's length
+      // way — and all three fade by distance rather than with `aaFade`, for the
+      // reason given where `upTo` is defined: a derivative-based fade prints
+      // the hull's own triangulation onto her side.
+      const fadePlate = upTo(200, 420).mul(gate).toVar(); // 2 m features
+      const fadeSeam = upTo(70, 150).mul(gate).toVar(); // 4 cm lines, but continuous
+      const fadeRivet = upTo(16, 34).mul(gate).toVar(); // 5 cm domes: gone by a ship's length
 
       // 1. panting: a linear tilt across each plate, which is a shallow barrel.
       // It flips sign at the plate edge, and that discontinuity is hidden under
@@ -457,12 +472,19 @@ export function createBoatMaterial({
 
     const gloss = float(1).sub(float(roughness)).toVar();
     if (damage !== null) {
-      // scorch creeps in from a noisy threshold, so at 0.5 damage half the
-      // panel is black and the rest is heat-discoloured, not a uniform grey
-      // wrapped for the same reason as the grain above
-      const dq = positionLocal.sub(floor(positionLocal.div(97)).mul(97));
-      const n = hash(dq.x.mul(7.1).add(dq.y.mul(13.7)).add(dq.z.mul(3.3)));
-      const n2 = hash(dq.x.mul(41.0).add(dq.y.mul(29.0)).add(dq.z.mul(17.0)));
+      // Scorch creeps in from a noisy threshold, so at half damage half the
+      // panel is black and the rest is heat-discoloured, not a uniform grey.
+      //
+      // Both octaves are cell noise, and both fade toward their own mean as
+      // they stop being resolvable. That matters more here than anywhere else
+      // in this file. Soot is a near-black mixed into the paint through a
+      // hard-edged mask, so once the mask is finer than a pixel the hardware
+      // averages black against grey and the whole section resolves to a flat
+      // mid-grey wash that swims as the ship moves — which is exactly what
+      // "shooting her turns her grey" was. Fading the noise to its mean makes
+      // the far-away result the honest average of the near-up one instead.
+      const n = mix(float(0.5), cellNoise(2.2, 1.7), upTo(110, 240)).toVar(); // ~45 cm
+      const n2 = mix(float(0.5), cellNoise(7.0, 3.1), upTo(35, 85)).toVar(); // ~14 cm
       // Two sources now, and they mean different things. The per-component
       // number is *wear* — a part that has been worked over is dirty and dull
       // all over — and it is deliberately capped well short of black, because a

@@ -244,6 +244,23 @@ export function createStructure({
     return events;
   }
 
+  // A component whose hit points have run out is not automatically on the deck
+  // — where it breaks is still the structure's business — but it *is* a good
+  // deal weaker than it was. This takes the same bite out of everything at
+  // once, so whichever section was already thinnest is the one that goes, which
+  // is the section that was shot the most. That is still emergent; it is only
+  // the trigger that is not.
+  function weaken(id, amount, from = null) {
+    const u = byId.get(id);
+    if (!u || u.gone) return null;
+    u.joint -= amount;
+    if (u.sections) for (let i = 0; i < u.sections.length; i++) u.sections[i] -= amount;
+    const at = from || (u.spine
+      ? { x: u.spine.base.x + 3, y: u.spine.base.y + u.spine.length * 0.4, z: u.spine.base.z }
+      : { x: u.foot.x + 3, y: u.foot.y, z: u.foot.z });
+    return check(u, at);
+  }
+
   // Force one, from the panel or a key.
   function breakAt(id, frac, from = null) {
     const u = byId.get(id);
@@ -276,7 +293,7 @@ export function createStructure({
   for (const u of list) if (u.spine) u.spine0 = { ...u.spine };
 
   return {
-    wound, collapse, breakAt, repair, byId, units: list,
+    wound, collapse, breakAt, weaken, repair, byId, units: list,
     state(id) { return byId.get(id); },
   };
 }
