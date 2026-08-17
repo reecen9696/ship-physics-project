@@ -304,7 +304,7 @@ async function main() {
   // for both the opening shot and the B-key swap, so the two can't drift apart:
   // the distance is a multiple of hull length, close enough that the ship is the
   // subject of the frame rather than a detail in a seascape.
-  const CHASE = { ship: 150, boat: 26 };
+  const CHASE = { ship: 210, boat: 34 };
   const frameHull = (v) => {
     const p = v.position;
     const back = v === ship ? CHASE.ship : CHASE.boat;
