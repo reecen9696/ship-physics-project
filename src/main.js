@@ -284,7 +284,8 @@ async function main() {
   // Anything that has come off her — guardrail, fittings — and the water it
   // throws when it lands. Both are world-space: they stop moving with the ship
   // the moment they leave her.
-  scene.add(battleship.debris.group);
+  scene.add(battleship.wreck.group);
+  scene.add(battleship.shards.mesh);
   scene.add(battleship.splash.mesh);
   // The plane the solver fitted to her buoyancy probes this frame, in the form
   // the ballistic systems want it: where the sea is, at a world point near her.
@@ -298,8 +299,20 @@ async function main() {
   let helmTarget = ship; // which body WASD drives
   ship.position.set(0, 0, 0);
   boat.position.set(60, 1, -240);
-  controls.target.copy(ship.position);
-  camera.position.set(0, 90, -300);
+
+  // Park the camera on the quarter of whichever hull has the helm. One function
+  // for both the opening shot and the B-key swap, so the two can't drift apart:
+  // the distance is a multiple of hull length, close enough that the ship is the
+  // subject of the frame rather than a detail in a seascape.
+  const CHASE = { ship: 150, boat: 26 };
+  const frameHull = (v) => {
+    const p = v.position;
+    const back = v === ship ? CHASE.ship : CHASE.boat;
+    controls.target.copy(p);
+    camera.position.set(p.x, p.y + back * 0.32, p.z - back);
+  };
+  frameHull(ship);
+
   const helm = attachBoatControls(boat, { isActive: () => helmTarget === boat });
   const shipHelm = attachBoatControls(ship, { isActive: () => helmTarget === ship });
 
@@ -345,10 +358,7 @@ async function main() {
   // behind whichever hull you just took
   const swapHelm = () => {
     helmTarget = helmTarget === boat ? ship : boat;
-    const p = helmTarget.position;
-    controls.target.copy(p);
-    const back = helmTarget === ship ? 260 : 34;
-    camera.position.set(p.x, p.y + back * 0.32, p.z - back);
+    frameHull(helmTarget);
   };
 
   createNavButtons({ onChangeBoat: swapHelm });
@@ -433,6 +443,8 @@ async function main() {
       dcEffort: 1,
       funnelSmoke: fx.funnelSmoke.on,
       fires: fx.fireSmoke.on,
+      // wreckage resting on her decks slides off when she rolls far enough
+      heel: ship.heel,
     });
 
     const followed = helmTarget;
