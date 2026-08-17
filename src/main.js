@@ -19,8 +19,13 @@ import { createBoat, attachBoatControls, boatConfig } from './boat/Boat.js';
 import { capitalShipHandling } from './boat/shipHandling.js';
 import { sprayConfig } from './boat/hullSpray.js';
 import { hullDescriptor as boatHull } from './boat/boatMesh.js';
+import { createHullCollision } from './boat/collision.js';
+import { createHullDamage } from './boat/hullDamage.js';
+import { hullQuery } from './boat/hullShape.js';
 import { createBattleship } from './battleship/Battleship.js';
+import { createColliders } from './battleship/colliders.js';
 import { SHIP_CONFIG } from './battleship/spec.js';
+import { createCameraCollision } from './scene/cameraCollision.js';
 import { createGUI } from './gui.js';
 import { createHUD } from './util/hud.js';
 import { fx, onFx } from './util/fxToggles.js';
@@ -236,8 +241,14 @@ async function main() {
   const windVec = new Vector3();
   const trueWind = new Vector3();
 
-  // boat: rigid hull floating on GPU-sampled probes of the same cascade maps
-  const boat = createBoat(renderer, { ocean, params, shading });
+  // boat: rigid hull floating on GPU-sampled probes of the same cascade maps.
+  // She has no component graph — see hullDamage.js — but she is holed and
+  // flooded on the same two numbers the battleship hands the solver, so ramming
+  // something eleven times her length has the consequence it should.
+  const launchDamage = createHullDamage({ hp: 100 });
+  const boat = createBoat(renderer, {
+    ocean, params, shading, flooding: launchDamage.state, capability: launchDamage.capability,
+  });
   scene.add(boat.group);
   scene.add(boat.spray.mesh); // droplets live in world space, not on the hull
   const boatContact = registerHull(boatHull, {
@@ -294,6 +305,82 @@ async function main() {
     width: 3.5, strength: 1, wakeSeconds: 2.0, water: shipWater,
   });
 
+  // --- the two hulls, against each other -------------------------------------
+  //
+  // Both are registered with the same solver; see boat/collision.js. What each
+  // one makes of being hit is its own business, which is why the damage lands
+  // through a callback rather than in the solver: the battleship works out which
+  // compartment took it and hits her damage model there, and the launch has one
+  // number and a hole in her.
+  //
+  // The scaling is set by the one collision that can actually happen: the launch
+  // at her full 26 kn into a stopped battleship, which is about 4.4 MJ. That
+  // should very nearly write off the launch and open a compartment on the ship
+  // without ever threatening her — a boat is not a torpedo.
+  const RAM_TO_SHIP = 9; // hit points per megajoule, against 400 per compartment
+  const RAM_TO_LAUNCH = 22; // hit points per megajoule, against 100 for the hull
+  const _rammed = new Vector3(0, 1, 0);
+  const collisions = createHullCollision();
+  collisions.add(ship, {
+    hull: battleship.hull,
+    mass: SHIP_CONFIG.mass,
+    stations: 11,
+    name: 'battleship',
+    onImpact: (ev) => {
+      const mj = ev.energy / 1e6;
+      const cpt = battleship.damage.compartmentAt(ev.local.z / battleship.hull.length);
+      battleship.damage.hit(cpt.id, {
+        damage: mj * RAM_TO_SHIP,
+        // A stem is a blunt instrument next to a shell: it dents plate over a
+        // wide area rather than punching through armour.
+        pen: 6,
+        breach: ev.kind === 'impact' ? Math.min(0.4, mj * 0.05) : 0,
+      });
+      if (ev.kind === 'impact' && battleship.splash.mesh.visible) {
+        battleship.splash.burst(ev.point, _rammed,
+          Math.min(3 + ev.speed, 12), Math.min(160, 30 + ev.speed * 12),
+          { spread: 1.3, size: 0.6, life: 1.6 });
+      }
+    },
+  });
+  collisions.add(boat, {
+    hull: boatHull,
+    mass: boatConfig.mass,
+    stations: 7,
+    name: 'launch',
+    onImpact: (ev) => {
+      const mj = ev.energy / 1e6;
+      launchDamage.hit({
+        damage: mj * RAM_TO_LAUNCH,
+        breach: ev.kind === 'impact' ? Math.min(0.6, mj * 0.12) : 0,
+        z: ev.local.z / boatHull.length,
+      });
+      if (ev.kind === 'impact' && boat.spray.mesh.visible) {
+        boat.spray.burst(ev.point, _rammed, Math.min(2 + ev.speed, 9), Math.min(90, 20 + ev.speed * 8),
+          { spread: 1.1, size: 0.4, life: 1.2 });
+      }
+    },
+  });
+
+  // --- and the camera, against both ------------------------------------------
+  //
+  // The ship's own colliders — the same analytic hull loft, deckhouses, funnel
+  // and turrets that wreckage lands on — double as what the camera is kept out
+  // of, so the camera cannot get inside anything a falling mast could rest on.
+  // Turrets are tested in their trained position, and a component that has been
+  // shot away stops being solid, both of which fall out of asking the ship
+  // rather than keeping a second description of her.
+  const shipColliders = createColliders({
+    mounts: battleship.mounts,
+    alive: (id) => battleship.damage.alive(id),
+  });
+  const cameraSolids = createCameraCollision(camera);
+  cameraSolids.add(ship.group, shipColliders.query, { radius: battleship.hull.length * 0.62 });
+  cameraSolids.add(boat.group, hullQuery(boatHull), { radius: boatHull.length * 0.7 });
+  // Dollying in past this is what used to put the eye inside the hull; the
+  // de-penetration would catch it, but stopping the zoom is the kinder answer.
+  controls.minDistance = 4;
+
   // The battleship is the ship you are here to drive; the launch is kept in the
   // scene as the small-hull case the same solver has to keep handling.
   let helmTarget = ship; // which body WASD drives
@@ -348,7 +435,7 @@ async function main() {
   globalThis.poseidon = {
     renderer, scene, camera, controls, ocean, boat, boatConfig, sprayConfig, helm, params,
     shading, contacts, boatContact, shipContact, sunLight, battleship, ship, setTimeOfDay,
-    showFxPanel,
+    showFxPanel, collisions, launchDamage, cameraSolids, shipColliders,
   };
 
   let view = 'fft';
@@ -367,6 +454,14 @@ async function main() {
     const k = e.key.toLowerCase();
     if (k === 'c') followBoat = !followBoat;
     else if (k === 'b') swapHelm();
+    else if (k === 'r') {
+      // The hull's own listener has already reset the physics; this puts back
+      // what the physics does not own. The launch also goes back to her billet
+      // out on the quarter — `reset()` drops her on the origin, which is now
+      // inside the battleship rather than merely on top of her.
+      if (helmTarget === boat) { launchDamage.repair(); boat.position.set(60, 1, -240); }
+      else battleship.damage.repair();
+    }
     else if (k === 'f') view = 'fft';
     else if (k === '1') view = 'spectrum0';
     else if (k === '2' && ocean.cascades[1]) view = 'spectrum1';
@@ -427,6 +522,15 @@ async function main() {
     if (helmTarget === boat) helm(simDt); else shipHelm(simDt);
     boat.update(simDt);
     ship.update(simDt);
+    // Both hulls have integrated and drawn themselves by now, so a contact
+    // resolved here has to put the drawn transform back where the corrected body
+    // is — otherwise the frame shows the overlap the solver just removed. Only
+    // position moves; the rotation a collision imparts arrives through `angVel`
+    // on the next step, where the solver owns it.
+    collisions.update(simDt);
+    boat.group.position.copy(boat.position);
+    ship.group.position.copy(ship.position);
+    launchDamage.update(simDt);
     shipSea.height = ship.state.waterY;
     shipSea.slopeX = ship.state.slopeX;
     shipSea.slopeZ = ship.state.slopeZ;
@@ -467,6 +571,9 @@ async function main() {
 
     if (spray) spray.update(dt, camera.position, windVec);
     controls.update();
+    // Last word on where the eye is, after the controls and the follow have both
+    // had theirs, and before anything is drawn from it.
+    if (cameraSolids.resolve()) skyDome.position.copy(camera.position);
 
     if (view === 'fft') {
       renderer.render(scene, camera);
@@ -501,7 +608,12 @@ async function main() {
           `power ${(cap.propulsion * 100).toFixed(0)}% · flooding ${(battleship.state.flood * 100).toFixed(0)}%` +
           `${battleship.state.burning > 0.05 ? ` · ON FIRE (${battleship.state.burning.toFixed(1)})` : ''}` +
           `${battleship.state.sinking ? ' · SINKING' : ''}\n`
-        : `${boat.spray.aliveCount} droplets\n`;
+        : `hull ${(launchDamage.integrity * 100).toFixed(0)}% · ` +
+          `helm ${(launchDamage.capability.helm * 100).toFixed(0)}% · ` +
+          `power ${(launchDamage.capability.propulsion * 100).toFixed(0)}% · ` +
+          `flooding ${(launchDamage.state.flood * 100).toFixed(0)}%` +
+          `${launchDamage.state.flood > 0.5 ? ' · SINKING' : ''} · ` +
+          `${boat.spray.aliveCount} droplets\n`;
       hud.set(
         `${(1000 / emaWall).toFixed(0)} fps\n` +
         `${isShip ? 'battleship' : 'launch'}: ${motion} · ${v.knots.toFixed(1)} kn · hdg ${((v.heading + 360) % 360).toFixed(0)}° · ` +

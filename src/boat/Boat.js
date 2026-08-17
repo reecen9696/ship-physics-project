@@ -27,6 +27,14 @@ const KT = 1.94384; // m/s -> knots
 // 1.3 s roll period, which is nothing like a boat. Pulled in to these fractions
 // the same six probes reproduce L*B^3/12 for a realistic waterplane coefficient,
 // giving GM ~= 3.9 m and a ~1.9 s roll.
+// Where the linearised probe area stops being right. Below this the fitted
+// area reproduces the design displacement; above it the hull is no wider than
+// it is at the waterline, so only the true waterplane counts — about 43% of the
+// fitted figure, which is the ratio of a real waterplane to the equivalent
+// prism the probes stand in for.
+const DESIGN_WL = 0.5; // m, hull-local
+const RESERVE_WP = 0.43;
+
 const PROBE_BEAM = 0.672;
 const PROBE_LAYOUT = [
   [-0.74, -0.51, 0.66], [0.74, -0.51, 0.66],
@@ -269,21 +277,36 @@ export function createBoat(renderer, {
       wet++;
       sumSub += sub;
 
-      // Flooding: water in the hull is buoyancy this probe no longer has. It is
-      // applied per-probe and weighted by where the water actually is, so
-      // compartments flooded forward put her down by the head — she trims and
-      // lists on the same solver that already floats her, rather than through a
-      // separate "sinking" animation.
-      let floodLoss = 0;
-      const floodAmount = flooding?.flood ?? flooding?.amount ?? 0;
-      if (floodAmount > 0) {
-        const zf = o[2] / HULL.length; // -0.5 .. 0.5
-        // 1 at the flooded end, tailing off toward the other
-        const floodZ = flooding?.floodZ ?? flooding?.z ?? 0;
-        const bias = 1 + 2.2 * (zf * Math.sign(floodZ) * Math.min(Math.abs(floodZ) * 6, 1));
-        floodLoss = Math.min(1, floodAmount * Math.max(0, bias));
-      }
-      const buoy = RHO_G * c.probeArea * sub * (1 - floodLoss);
+      // --- how much of her is actually under, not how deep the probe is ------
+      //
+      // `probeArea * sub` is a linearisation fitted at the design draft, and it
+      // has one property that is fine for a boat and fatal for a ship that is
+      // supposed to be able to sink: the waterplane never stops growing. Press
+      // her down far enough and it will hold up any weight you like.
+      //
+      // A real hull is no wider above her waterline than at it, and above her
+      // deck edge she has no waterplane at all. So the column each probe stands
+      // for is integrated in two parts: full area up to the design line, the
+      // real (much smaller) waterplane from there to the deck edge, and nothing
+      // above it.
+      //
+      // Three things fall out of those five lines, none of which is modelled
+      // anywhere else. Her reserve buoyancy comes out at about 28,000 tonnes,
+      // which is what it should be. She founders when the water in her beats
+      // that, rather than when a number crosses a threshold. And she can
+      // *capsize*: heel her far enough and the low probe's deck edge goes under
+      // while the high one lifts clear, so the righting moment stops growing,
+      // flattens, and goes over — which is the shape of a real righting-arm
+      // curve and the reason ships roll over instead of settling upright.
+      const upY = up.y > 0.15 ? up.y : 0.15;
+      const yw = o[1] + sub * upY; // the waterline, in her own frame
+      const deckEdge = HULL.deckAt
+        ? HULL.deckAt(o[2] / HULL.length + 0.5)
+        : HULL.deck;
+      const h1 = Math.min(yw, DESIGN_WL) - o[1];
+      const h2 = Math.min(yw, deckEdge) - DESIGN_WL;
+      const column = Math.max(h1, 0) + Math.max(h2, 0) * RESERVE_WP;
+      const buoy = RHO_G * c.probeArea * column;
       _v.copy(angVel).cross(_r).add(velocity);
       const frac = sub / c.maxDepth;
 
@@ -292,6 +315,36 @@ export function createBoat(renderer, {
       _f.set(-buoy * sx * c.slopePush, buoy - c.heaveDamp * _v.y * frac, -buoy * sz * c.slopePush);
       applyAt(_f, _r);
     }
+
+    // --- the water in her --------------------------------------------------
+    // Not a loss of buoyancy: a weight, at the place the water actually is. See
+    // battleship/flooding.js, which works out both by clipping her own section
+    // curves with the tilted water surface. Trim, list and the free-surface
+    // loss of stability are all this one loop; none of them is a separate term.
+    let floodMass = 0;
+    const loads = flooding?.loads;
+    if (loads && loads.length) {
+      for (let i = 0; i < loads.length; i++) {
+        const L = loads[i];
+        if (L.mass <= 0) continue;
+        floodMass += L.mass;
+        _r.copy(L.r).applyQuaternion(quaternion);
+        _f.set(0, -L.mass * 9.81, 0);
+        applyAt(_f, _r);
+      }
+    } else if (flooding) {
+      // The launch has no compartments; anything that only reports a fraction
+      // gets the old lumped treatment.
+      const amount = flooding.flood ?? flooding.amount ?? 0;
+      if (amount > 0) {
+        floodMass = amount * c.mass * 0.6;
+        force.y -= floodMass * 9.81;
+      }
+    }
+    // Flooded water is mass as well as weight: she is heavier *and* more
+    // sluggish. Leaving it out of the denominator would have her accelerate
+    // downward as though the sea were pushing.
+    const mEff = c.mass + floodMass;
 
     const wetFrac = wet / PROBES.length;
     const vFwd = velocity.dot(fwd);
@@ -384,14 +437,14 @@ export function createBoat(renderer, {
     }
 
     // semi-implicit Euler
-    velocity.addScaledVector(force, h / c.mass);
+    velocity.addScaledVector(force, h / mEff);
 
     // torque -> body frame -> angular acceleration -> back to world
     _t.copy(torque).applyQuaternion(_q.copy(quaternion).invert());
     _t.set(
-      _t.x / (inertiaPerKg.x * c.mass),
-      _t.y / (inertiaPerKg.y * c.mass),
-      _t.z / (inertiaPerKg.z * c.mass),
+      _t.x / (inertiaPerKg.x * mEff),
+      _t.y / (inertiaPerKg.y * mEff),
+      _t.z / (inertiaPerKg.z * mEff),
     ).applyQuaternion(quaternion);
     angVel.addScaledVector(_t, h);
     angVel.multiplyScalar(1 / (1 + c.angDamp * h));
@@ -659,6 +712,12 @@ export function createBoat(renderer, {
     position,
     velocity,
     quaternion,
+    // World-frame, and exposed so something outside the solver can put a spin
+    // into her — a collision, most obviously. The handling model overwrites the
+    // yaw component every step, so a hull on that model takes the roll and pitch
+    // of a blow and none of the swing, which is the right answer for 42,000
+    // tonnes being nudged by a launch.
+    angVel,
     // The drawn rotation, which carries the handling model's cosmetic heel on
     // top of the physics one. The ocean's contact wash follows this rather than
     // `quaternion`, so the wash stays glued to the hull you can actually see.
