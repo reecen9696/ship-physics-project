@@ -25,6 +25,7 @@ import { createGUI } from './gui.js';
 import { createHUD } from './util/hud.js';
 import { fx, onFx } from './util/fxToggles.js';
 import { createFxPanel } from './util/fxPanel.js';
+import { createNavButtons } from './util/navButtons.js';
 
 const hud = createHUD();
 
@@ -312,10 +313,14 @@ async function main() {
     setTimeOfDay,
   });
 
-  // Bottom-left switchboard for everything on a hull that moves with the sea.
+  // The fx switchboard is off by default — the bottom-left corner is for the two
+  // buttons now. The toggles still exist and still drive the sim from their
+  // defaults; poseidon.showFxPanel() puts the panel back for a bisection session.
+  let fxPanel = null;
+  const showFxPanel = () => (fxPanel ??= createFxPanel());
+
   // The shader-side terms are scaled by uniforms the panel writes directly; the
   // two particle systems have no shader term to scale, so they are hooked here.
-  createFxPanel();
   onFx('hullSpray', (on) => {
     sprayConfig.enabled = on;
     boat.spray.mesh.visible = on;
@@ -330,20 +335,28 @@ async function main() {
   globalThis.poseidon = {
     renderer, scene, camera, controls, ocean, boat, boatConfig, sprayConfig, helm, params,
     shading, contacts, boatContact, shipContact, sunLight, battleship, ship, setTimeOfDay,
+    showFxPanel,
   };
 
   let view = 'fft';
   let followBoat = true;
+
+  // swap the helm between the launch and the battleship, and put the camera
+  // behind whichever hull you just took
+  const swapHelm = () => {
+    helmTarget = helmTarget === boat ? ship : boat;
+    const p = helmTarget.position;
+    controls.target.copy(p);
+    const back = helmTarget === ship ? 260 : 34;
+    camera.position.set(p.x, p.y + back * 0.32, p.z - back);
+  };
+
+  createNavButtons({ onChangeBoat: swapHelm });
+
   addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'c') followBoat = !followBoat;
-    else if (k === 'b') { // swap the helm between the launch and the battleship
-      helmTarget = helmTarget === boat ? ship : boat;
-      const p = helmTarget.position;
-      controls.target.copy(p);
-      const back = helmTarget === ship ? 260 : 34;
-      camera.position.set(p.x, p.y + back * 0.32, p.z - back);
-    }
+    else if (k === 'b') swapHelm();
     else if (k === 'f') view = 'fft';
     else if (k === '1') view = 'spectrum0';
     else if (k === '2' && ocean.cascades[1]) view = 'spectrum1';
@@ -363,9 +376,7 @@ async function main() {
   let elapsed = 0;
   let last = performance.now();
   let emaWall = 16.7;
-  let gpuMs = -1;
   let hudAccum = 1;
-  let resolving = false;
   const follow = new Vector3();
 
   // An exception inside the animation callback stops three's loop dead and
@@ -413,8 +424,8 @@ async function main() {
     shipSea.originZ = ship.position.z;
     battleship.update(dt, {
       // signed, so the shafts turn astern when she backs down; the funnel smoke
-      // only cares about how hard the boilers are working, so it takes the
-      // magnitude itself
+      // gates on the acceleration it differences out of `velocity`, so she only
+      // makes it while working up
       throttle: ship.input.throttle,
       velocity: ship.velocity,
       wind: trueWind,
@@ -460,11 +471,6 @@ async function main() {
     hudAccum += dt;
     if (hudAccum >= 0.25) {
       hudAccum = 0;
-      if (renderer.backend.trackTimestamp && !resolving) {
-        resolving = true;
-        renderer.resolveTimestampsAsync('render').then(() => { gpuMs = renderer.info.render.timestamp; }).catch(() => {}).finally(() => { resolving = false; });
-      }
-      const gpuTxt = gpuMs >= 0 ? `${gpuMs.toFixed(2)} ms GPU/render` : 'GPU ms n/a';
       // report whichever hull the helm is actually on
       const v = helmTarget;
       const isShip = v === ship;
@@ -485,8 +491,7 @@ async function main() {
           `${battleship.state.sinking ? ' · SINKING' : ''}\n`
         : `${boat.spray.aliveCount} droplets\n`;
       hud.set(
-        `WebGPU · ${(1000 / emaWall).toFixed(0)} fps · ${emaWall.toFixed(2)} ms wall · ${gpuTxt}\n` +
-        `step 6 · foam · N=${params.N} · ${ocean.cascades.length} cascades · choppiness λ=${ocean.lambda.value.toFixed(2)} (+/-)\n` +
+        `${(1000 / emaWall).toFixed(0)} fps\n` +
         `${isShip ? 'battleship' : 'launch'}: ${motion} · ${v.knots.toFixed(1)} kn · hdg ${((v.heading + 360) % 360).toFixed(0)}° · ` +
         `${engineTxt} · helm ${helmTxt}\n` +
         `turn ${v.turnRate.toFixed(1)}°/s · drift ${v.state.drift.toFixed(1)}° · ` +
@@ -494,9 +499,7 @@ async function main() {
         `draft ${v.state.submerged.toFixed(2)} m · ${v.state.wet}/6 wet\n` +
         shipLine +
         `${v.telegraph ? 'W/S = telegraph · A/D = wheel · SPACE = stop' : 'WASD = helm'} · ` +
-        `B = swap ship · R = reset · C = ${followBoat ? 'unfollow' : 'follow'} · drag = orbit\n` +
-        `view: ${view}   (F = ocean, 5 = height map, 1/2/3 = spectra)\n` +
-        fftStr,
+        `R = reset · C = ${followBoat ? 'unfollow' : 'follow'} · drag = orbit`,
       );
     }
   }

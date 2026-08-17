@@ -116,7 +116,12 @@ export function createBoatMaterial({
       // same plane with opposite signs and the same noise, so the stump and the
       // piece that fell off it interlock.
       If(dot(cutPlane.xyz, cutPlane.xyz).greaterThan(0.25), () => {
-        const sd = dot(cutPlane.xyz, fp).sub(cutPlane.w).add(nz.sub(0.5).mul(1.1));
+        // The wobble is a displacement of the *position*, not of the distance,
+        // which matters: the stump and the piece that fell off it carry the
+        // same plane with opposite signs, so a term added to the distance would
+        // eat a gap between them that you could see daylight through. Displace
+        // the point instead and the two tears interlock exactly.
+        const sd = dot(cutPlane.xyz, fp.add(vec3(nz.sub(0.5).mul(1.15)))).sub(cutPlane.w);
         Discard(sd.greaterThan(0));
         // a break is bare metal for a metre back from the edge
         rimT.assign(saturate(sd.add(0.9).mul(1.1)));
@@ -169,9 +174,14 @@ export function createBoatMaterial({
       // in battleship/scuttles.js, so that the ones in the hull are the same
       // fitting as the ones on the deckhouses two metres above them.
       //
-      // `paintMask` is 1 on the hull plating and 0 everywhere else, so one
-      // shared material can paint a hull and leave a funnel alone.
-      base.assign(mix(base, paintCol, attribute('paintMask', 'float').mul(fx.hullPaint.u)));
+      // `paintMask` carries two flags in one float, because eight vertex
+      // buffers is the WebGPU limit and this geometry uses all eight: bit 0 is
+      // the hull plating that takes this paint — so one shared material can
+      // paint a hull and leave a funnel alone — and bit 1 is rolled plate, read
+      // by the plating section below.
+      const mask = attribute('paintMask', 'float').toVar();
+      const painted = mask.sub(floor(mask.mul(0.5)).mul(2));
+      base.assign(mix(base, paintCol, painted.mul(fx.hullPaint.u)));
     }
 
     // Nothing here shades against the water any more.
@@ -359,13 +369,14 @@ export function createBoatMaterial({
     // couple of metres wide, plates six or so long, with the butts staggered
     // every other strake so the seams do not line up into a grid.
     //
-    // `plate` is the gate: 1 on anything made of rolled plate, 0 on anything
-    // turned, spun or drawn — a gun barrel, a mast, a stanchion — which has no
-    // seam in it anywhere. See `paint()` in battleship/shipMaterial.js, which
-    // reads it off the geometry type.
+    // Bit 1 of `paintMask` is the gate: set on anything made of rolled plate,
+    // clear on anything turned, spun or drawn — a gun barrel, a mast, a
+    // stanchion — which has no seam in it anywhere. See `paint()` in
+    // battleship/shipMaterial.js, which reads it off the geometry type.
     if (plating !== null) {
       const P = plating;
-      const gate = attribute('plate', 'float').mul(fx.hullPlating.u).toVar();
+      const flags = attribute('paintMask', 'float').toVar();
+      const gate = floor(flags.mul(0.5)).mul(fx.hullPlating.u).toVar();
       const { T, B } = platingFrame(N); // T along the run of the strakes, B across
 
       // plate coordinates, in plates

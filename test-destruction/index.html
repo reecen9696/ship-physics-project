@@ -14,6 +14,17 @@
       color: #cfe6ff; white-space: pre; pointer-events: none;
       text-shadow: 0 1px 2px rgba(0,0,0,0.85);
     }
+    /* mirrors #navbtns on the main page, so the trip back looks like the trip out */
+    #navbtns {
+      position: fixed; left: 12px; bottom: 12px; z-index: 15; display: flex; gap: 8px;
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: none;
+    }
+    #navbtns a {
+      font: inherit; color: #cfe6ff; background: rgba(8,14,20,0.78); text-decoration: none;
+      border: 1px solid #2c4256; border-radius: 6px; padding: 7px 12px; cursor: pointer;
+      backdrop-filter: blur(3px); letter-spacing: 0.02em;
+    }
+    #navbtns a:hover { background: #21374a; border-color: #4d9fd6; }
     #err {
       position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 20; display: none;
       font: 12px/1.5 ui-monospace, monospace; color: #ffd7d7;
@@ -61,6 +72,7 @@
   </style>
 </head>
 <body>
+  <div id="navbtns"><a href="/" title="Back to the ocean sim">← Back to ocean</a></div>
   <script type="module" src="/src/testDestruction/main.js"></script>
 </body>
 </html>

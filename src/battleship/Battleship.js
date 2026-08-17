@@ -291,6 +291,11 @@ export function createBattleship({ shading, sunShadow }) {
   let shaftRps = 0;
   const _carry = new Vector3();
   let smokeDebt = 0;
+  // She only makes funnel smoke while the boilers are being worked up, so we
+  // need her acceleration: last frame's speed, and a smoothed rate of change so
+  // the plume doesn't flicker with the sea state jostling her velocity about.
+  let lastSpeed = 0;
+  let accel = 0;
   const fireDebt = new Map();
 
   // Ship-local point -> world, using the root's current transform.
@@ -308,7 +313,8 @@ export function createBattleship({ shading, sunShadow }) {
   // Things the ship is *set* to, as opposed to things that have happened to her.
   const settings = {};
 
-  // `throttle` drives funnel smoke, `velocity`/`wind` carry the plumes, and
+  // `throttle` turns the shafts, `velocity` is differenced for the acceleration
+  // that gates funnel smoke, `velocity`/`wind` carry the plumes, and
   // `sea` is the water plane the buoyancy solver fitted this frame — wreckage
   // needs to know where the surface is to land in it.
   function update(dt, {
@@ -340,16 +346,31 @@ export function createBattleship({ shading, sunShadow }) {
     _carry.set(0, 0, 0);
     if (velocity) _carry.copy(velocity).multiplyScalar(0.5);
 
-    // funnel smoke: a working ship always makes some, and more under power
+    // How hard she is gathering way. Positive only: coming off the power or
+    // backing down is not work for the boilers, so it makes no smoke.
+    if (velocity) {
+      const speed = Math.hypot(velocity.x, velocity.z);
+      const raw = dt > 0 ? (speed - lastSpeed) / dt : 0;
+      lastSpeed = speed;
+      accel += (raw - accel) * Math.min(dt * 4, 1);
+    } else {
+      accel += (0 - accel) * Math.min(dt * 4, 1);
+    }
+    // Working up: 0 at a steady speed, 1 by the time she is really pouring it
+    // on. m/s^2 — a battleship accelerating hard is still under half of one.
+    const workingUp = Math.min(Math.max(accel, 0) / 0.35, 1) * Math.abs(throttle);
+
+    // funnel smoke: only while she is working up. A shot-away funnel belches
+    // regardless — that smoke is damage, not effort.
     smokeDebt += makeSmoke
-      ? (2 + Math.abs(throttle) * 26 + (damage.alive('funnel') ? 0 : 40)) * dt
+      ? (workingUp * 28 + (damage.alive('funnel') ? 0 : 40)) * dt
       : 0;
     const puffs = Math.floor(smokeDebt);
     if (puffs > 0) {
       smokeDebt -= puffs;
       fx.emit(toWorld(funnelSmoke, new Vector3()), puffs, {
         kind: 0,
-        rise: 3.5 + throttle * 2.5,
+        rise: 3.5 + workingUp * 2.5,
         spread: SUPER.funnel.rx * 1.4,
         size: 3.2,
         life: 7.0,

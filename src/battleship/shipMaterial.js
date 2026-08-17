@@ -51,13 +51,14 @@ export function createShipMaterials({ shading, sunShadow, destruction = null }) 
     destruction,
   };
 
-  // She is a riveted ship, and her sides say so: strakes about two metres wide
-  // and plates six long, butts staggered, a row of heads down every seam, and
-  // each plate bellying a little between the frames it is held to. Sizes are
-  // what a wartime yard could actually roll and lift. Only the body program
-  // carries it — the deck is timber and the windows are glass — and inside the
-  // shader it is gated to the hull plating, so nothing turned or drawn (a
-  // barrel, a mast, a boat davit) is given a seam it could not have.
+  // She is a riveted ship, and every plated part of her says so: strakes about
+  // two metres wide and plates six long, butts staggered, a row of heads down
+  // every seam, and each plate bellying a little between the frames it is held
+  // to. Sizes are what a wartime yard could actually roll and lift. Only the
+  // body program carries it — the deck is timber and the windows are glass —
+  // and inside the shader it is gated by the `plate` attribute, so her sides,
+  // her deckhouses and her turret faces are plated and nothing turned or drawn
+  // is given a seam it could not have. See `paint()` below.
   const body = createBoatMaterial({
     ...shared,
     // the liner meshes behind her plating ride on this same program — see
@@ -71,7 +72,7 @@ export function createShipMaterials({ shading, sunShadow, destruction = null }) 
       rivet: 0.11, // pitch of the heads along a seam, m (~4 diameters)
       head: 0.05, // radius of a head, m
       proud: 0.42, // how far a head's normal leans off the plate
-      dish: 0.09, // the belly of a plate between its edges
+      dish: 0.06, // the belly of a plate between its edges
     },
   });
   // Windows get their own program. It is the one place on the ship where the
@@ -156,6 +157,14 @@ export function createShipMaterials({ shading, sunShadow, destruction = null }) 
 // or a torus, and has no seam in it anywhere. Reading it off the primitive type
 // gets that distinction right by construction and keeps it right as parts are
 // added. Pass `plate` explicitly to override it either way.
+//
+// It rides in `paintMask` as a second bit rather than in an attribute of its
+// own, because WebGPU allows a pipeline eight vertex buffers and this geometry
+// already uses all eight (position, normal, color, rough, metal, dmgIndex,
+// paintMask, inside). A ninth does not fail at the draw call with something
+// legible — it fails as an invalid render pipeline and the ship disappears.
+// Bit 0 is "takes the waterline paint", bit 1 is "is made of plate"; see the
+// decode at the head of the planking section in boatMaterial.js.
 const TURNED = /Cylinder|Sphere|Torus|Cone|Capsule|Lathe|Tube/;
 const _c = new Color();
 export function paint(geometry, {
@@ -174,9 +183,8 @@ export function paint(geometry, {
   geometry.setAttribute('rough', new Attr(new Float32Array(n).fill(roughness), 1));
   geometry.setAttribute('metal', new Attr(new Float32Array(n).fill(metal), 1));
   geometry.setAttribute('dmgIndex', new Attr(new Float32Array(n).fill(slot), 1));
-  geometry.setAttribute('paintMask', new Attr(new Float32Array(n).fill(paintMask), 1));
   const plated = plate === null ? (TURNED.test(geometry.type) ? 0 : 1) : plate;
-  geometry.setAttribute('plate', new Attr(new Float32Array(n).fill(plated), 1));
+  geometry.setAttribute('paintMask', new Attr(new Float32Array(n).fill(paintMask + plated * 2), 1));
   // 1 on the inward-facing liner meshes: the same program shades them, but as
   // unpainted framed steel in a dark space rather than as her side.
   geometry.setAttribute('inside', new Attr(new Float32Array(n).fill(inside), 1));

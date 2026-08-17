@@ -207,7 +207,12 @@ export function buildHullNumber(materials, text = '724', opts = {}) {
     ]) {
       const g = projectToHull(polys, { side, zMid, proud: layer.proud, offset: layer.offset });
       const m = new Mesh(
-        paint(g, { color: layer.color, roughness: layer.rough, slot, metal: layer.metal }),
+        // `plate: 0` — this is paint lying on the plating, not plating: it must
+        // not grow a set of seams and rivets of its own on top of the ones
+        // already underneath it.
+        paint(g, {
+          color: layer.color, roughness: layer.rough, slot, metal: layer.metal, plate: 0,
+        }),
         materials.body,
       );
       m.name = 'hullNumber';
