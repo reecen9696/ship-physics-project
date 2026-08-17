@@ -714,20 +714,36 @@ export function createBattleship({ shading, sunShadow }) {
     // on. m/s^2 — a battleship accelerating hard is still under half of one.
     const workingUp = Math.min(Math.max(accel, 0) / 0.35, 1) * Math.abs(throttle);
 
-    // funnel smoke: only while she is working up. A shot-away funnel belches
-    // regardless — that smoke is damage, not effort.
+    // Funnel smoke, in three parts.
+    //
+    // There is always some. Her boilers are lit whenever she is a going
+    // concern — steam for the turbines, the generators, the auxiliaries — and a
+    // capital ship lying stopped with a clean funnel looks switched off. What
+    // she makes at rest is thin: a haze standing off the top and leaning away
+    // downwind.
+    //
+    // Steaming adds to it, and *working up* adds a great deal more on top,
+    // because that is the one that is really a description of the stokehold:
+    // opening her out means more oil into the furnaces than the fires have
+    // caught up with, and the surplus goes up the funnel as black smoke.
+    //
+    // A shot-away funnel belches regardless — that smoke is damage, not effort.
+    const steaming = Math.min(Math.abs(throttle), 1);
     smokeDebt += makeSmoke
-      ? (workingUp * 28 + (damage.alive('funnel') ? 0 : 40)) * dt
+      ? (5 + steaming * 9 + workingUp * 28 + (damage.alive('funnel') ? 0 : 40)) * dt
       : 0;
     const puffs = Math.floor(smokeDebt);
     if (puffs > 0) {
       smokeDebt -= puffs;
       fx.emit(toWorld(funnelSmoke, new Vector3()), puffs, {
         kind: 0,
-        rise: 3.5 + workingUp * 2.5,
+        // The idle haze is not just less smoke, it is *different* smoke: it
+        // barely rises, it drifts, and it thins out quickly. Effort is what
+        // makes a plume that climbs and holds together.
+        rise: 1.6 + steaming * 1.2 + workingUp * 2.8,
         spread: SUPER.funnel.rx * 1.4,
-        size: 3.2,
-        life: 7.0,
+        size: 2.4 + workingUp * 1.2,
+        life: 4.5 + workingUp * 3.0,
         grow: 2.6,
         carry: _carry,
       });
