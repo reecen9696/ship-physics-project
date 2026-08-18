@@ -6,6 +6,7 @@ import {
   uniform, texture3D, Loop, If, Discard,
 } from 'three/tsl';
 import { skyColor } from '../ocean/sky.js';
+import { handLight } from '../scene/torch.js';
 import { fx } from '../util/fxToggles.js';
 import {
   platingFrame, anisoReflectDir, envDFG, energyCompensation, ggxSpecular,
@@ -69,6 +70,10 @@ export function createBoatMaterial({
   // { count, on, pos, col } — the same again for her guns, which are lights for
   // a tenth of a second at a time. See the block at the foot of the shader.
   flashes = null,
+  // { on, pos, dir, col } — the lights a man carries: the torch clamped under a
+  // rifle's handguard and the flash at its muzzle. Same frame as the two rigs
+  // above. See scene/torch.js.
+  torch = null,
 }) {
   const mat = new MeshBasicNodeMaterial();
 
@@ -101,6 +106,16 @@ export function createBoatMaterial({
     // How far this fragment is inside the ship rather than on her outside. Baked
     // per-vertex so the liner meshes can share this program; see interior.js.
     const inside = (interior ? attribute('inside', 'float') : float(0)).toVar();
+    // And whether this fragment is a surface of a room somebody stands in, which
+    // decides whether her lamps land on it flat or through its own colour. Bit 8
+    // of `paintMask` — see the note there for why it is a bit and not a ninth
+    // vertex attribute — and the lamp block at the foot of this file for what it
+    // does.
+    const roomLit = (() => {
+      if (!interior) return float(0).toVar();
+      const m = attribute('paintMask', 'float');
+      return floor(m.div(256)).sub(floor(m.div(512)).mul(2)).toVar();
+    })();
 
     // Per-object, and *constant*: where this mesh's vertices land in the ship's
     // frame with every mount at rest. Constant is the entire point. A turret
@@ -112,7 +127,7 @@ export function createBoatMaterial({
     // written in her frame rather than properties of any mesh, so both need the
     // same answer to the same question — where in the ship am I? — and asking it
     // twice would be two matrices and two multiplies for one number.
-    const shipXform = (destruction !== null || lamps !== null || flashes !== null)
+    const shipXform = (destruction !== null || lamps !== null || flashes !== null || torch !== null)
       ? uniform(new Matrix4()).onObjectUpdate(function (frame) {
         const m = frame.object.userData.fieldXform;
         if (m) this.value.copy(m); else this.value.identity();
@@ -1016,7 +1031,17 @@ export function createBoatMaterial({
           });
         }
       });
-      lit.addAssign(spill.mul(vis).mul(night));
+      // Flat on her outside, through the surface's own colour inside a room.
+      //
+      // The multiplier is `base` rather than `albedo`: albedo is the colour with
+      // the metalness taken out of it, and every plate on this ship is most of
+      // the way to bare steel, so lighting a compartment by albedo lights it at a
+      // third of what it should be and takes the brass and the teak down with the
+      // grey. What a lamp in a room lands on is the paint, and `base` is the
+      // paint. The gain is what puts a mid grey bulkhead back at about the
+      // brightness the flat term used to give it, so a room comes out lit rather
+      // than merely tinted.
+      lit.addAssign(spill.mul(mix(vec3(1), base.mul(1.5), roomLit)).mul(vis).mul(night));
     }
 
     // --- and when a gun goes off ------------------------------------------------
@@ -1063,6 +1088,32 @@ export function createBoatMaterial({
           });
         }
         lit.addAssign(blast);
+      });
+    }
+
+    // --- and the two lights that walk about -------------------------------------
+    //
+    // A torch under a rifle, and the flash at its muzzle. Same frame as the guns
+    // and the lamps, same argument for the branch — for the great majority of
+    // the game neither is burning, and on those frames this is a compare — but a
+    // different shape of light: they have an axis and a cone, so a torch lights a
+    // disc on a bulkhead rather than the whole compartment. See scene/torch.js.
+    //
+    // Not gated on night. A torch in daylight does nothing visible and the
+    // falloff says so on its own; gating it would only mean the beam vanished at
+    // dawn while the lamp was plainly still burning on the end of the gun.
+    if (torch !== null) {
+      If(torch.on.greaterThan(0), () => {
+        const shipP = shipXform.mul(vec4(positionLocal, 1)).xyz.toVar();
+        const shipN = normalize(shipXform.mul(vec4(normalLocal, 0)).xyz).toVar();
+        // Multiplied by the albedo, unlike the two rigs above it. Those are
+        // rig light: a scuttle's spill and a gun's flash are added flat, which
+        // is a simplification they get away with because they are dim and warm
+        // and land on a ship that is already lit. A torch is not — after dark it
+        // *is* the light on whatever it is pointed at, and adding it flat lights
+        // a black bulkhead and a white one to the same grey. Through the albedo
+        // it lights them as what they are.
+        lit.addAssign(handLight(torch, shipP, shipN).mul(albedo));
       });
     }
 

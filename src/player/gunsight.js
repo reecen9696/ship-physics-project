@@ -21,11 +21,32 @@
 
 const NS = 'http://www.w3.org/2000/svg';
 
+// How long the eye takes to come back, and how it comes back. Deliberately much
+// longer than the flash in the world: the flash is over in a third of a second
+// and being dazzled by it is not.
+const DAZZLE = { life: 1.35, falloff: 2.6 };
+
 const CSS = `
 #gunsight { position:fixed; inset:0; z-index:40; pointer-events:none; display:none;
   font:600 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color:#dfe6ea;
   letter-spacing:.06em; }
 #gunsight.on { display:block; }
+
+/* The gun going off in your face.
+ *
+ * Two sixteen-inch guns fire a couple of metres from the sighting hood, and
+ * what the eye does about that is stop working for a moment. The muzzle flash
+ * itself is drawn in the world and is over in a third of a second; this is the
+ * part that happens *behind* the eye, and it has to outlast the flash by a good
+ * margin or it reads as a lamp rather than as being dazzled.
+ *
+ * Its own element rather than a filter on the scene: it must sit over the
+ * graticule as well, because the wires are the first thing to come back out of
+ * the white and that is most of what sells the recovery. Screen-blended, so it
+ * washes the picture out rather than painting over it. */
+#gunsight .dazzle { position:absolute; inset:0; opacity:0;
+  background:radial-gradient(135% 105% at 50% 46%,
+    #fffef9 0%, #fff4d8 28%, #ffd79a 60%, #f0a04a 100%); }
 #gunsight svg { position:absolute; inset:0; width:100%; height:100%; }
 #gunsight .plate { position:absolute; left:50%; transform:translateX(-50%);
   background:linear-gradient(#2a2f36,#171a1f); border:2px solid #6b5a34;
@@ -46,12 +67,42 @@ const CSS = `
   font-size:11px; opacity:.55; letter-spacing:.1em; white-space:nowrap; }
 #gunsight .load { position:absolute; left:50%; top:calc(50% + 12vh); transform:translateX(-50%);
   font-size:11px; letter-spacing:.14em; color:#ffb36b; }
+
+/* --- the stern mounting -----------------------------------------------------
+ *
+ * A different instrument, because it is a different gun. There is no range
+ * plate: an automatic firing a self-destructing round at two thousand metres is
+ * not laid to a range, it is pointed. What the layer needs told instead is the
+ * two things that decide whether he may go on pulling the trigger — how many
+ * rounds are in the racks and how hot the barrels are — and the one thing that
+ * decides whether the gun will answer at all, which is the cut-out. */
+#gunsight.aa .range, #gunsight.aa .panel { display:none; }
+#gunsight .aapanel { display:none; bottom:1.2vh; padding:7px 18px 9px; gap:24px;
+  align-items:flex-end; }
+#gunsight.aa .aapanel { display:flex; }
+#gunsight .aapanel div { text-align:center; }
+#gunsight .aapanel b { display:block; font-size:10px; letter-spacing:.16em; color:#c9ac68;
+  margin-bottom:5px; }
+#gunsight .aapanel i { display:block; font-style:normal; font-size:15px;
+  font-variant-numeric:tabular-nums; }
+#gunsight .heat { width:128px; height:9px; background:#0b0e12; border:1px solid #4a4034;
+  position:relative; overflow:hidden; }
+#gunsight .heat u { display:block; height:100%; width:0%; text-decoration:none;
+  background:linear-gradient(90deg,#5fa9d8 0%,#e8c464 55%,#ff5f2a 100%); }
+/* where the gun ceases fire, drawn on the gauge so the limit is a place rather
+ * than a surprise */
+#gunsight .heat s { position:absolute; top:0; bottom:0; width:1px; background:#ffffff66; }
+#gunsight .warn { position:absolute; left:50%; top:calc(50% + 15vh); transform:translateX(-50%);
+  font-size:12px; letter-spacing:.2em; color:#ff8a5c; text-shadow:0 0 10px #ff5a2a55;
+  white-space:nowrap; }
 `;
 
 export function createGunsight() {
   const style = document.createElement('style');
   style.textContent = CSS;
   document.head.append(style);
+
+  const flash = { t: 1e3, mag: 0 };
 
   const root = document.createElement('div');
   root.id = 'gunsight';
@@ -169,8 +220,48 @@ export function createGunsight() {
   pipDot.setAttribute('r', '1.8');
   pip.append(pipRing, pipDot);
 
+  // --- the ring sight ---------------------------------------------------------
+  //
+  // What is engraved on the stern mounting's sight, and it is not a cross. A
+  // cross tells you where the gun is pointing, which is the wrong question for a
+  // target that is crossing: what a ring sight tells you is *how far to aim in
+  // front*, by giving you a set of radii that correspond to crossing speeds. You
+  // put the aeroplane on the ring and fire where it is going.
+  //
+  // The radii are angular — degrees of half-angle, from AA_LAYING — so they are
+  // sized against the field of view in `set` rather than against the window in
+  // `layout`. That is the whole reason this is drawn rather than modelled: a
+  // hoop of steel in front of the camera would be the right size at exactly one
+  // field of view and the wrong size at every other.
+  const reticle = document.createElementNS(NS, 'g');
+  const aaRings = [0, 1].map((i) => {
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('fill', 'none');
+    c.setAttribute('stroke', i ? '#0b0f13' : '#0b0f13');
+    c.setAttribute('stroke-width', i ? '2.6' : '2.0');
+    c.setAttribute('stroke-opacity', i ? '0.85' : '0.7');
+    return c;
+  });
+  // Four short posts at the cardinals, which is what holds a real ring in its
+  // mount and is also what stops a bare circle reading as a lens flare.
+  const posts = [0, 1, 2, 3].map(() => {
+    const l = document.createElementNS(NS, 'line');
+    l.setAttribute('stroke', '#0b0f13');
+    l.setAttribute('stroke-width', '2.4');
+    l.setAttribute('stroke-opacity', '0.85');
+    return l;
+  });
+  // and the bead in the middle: the gun's own line, open in the centre so it
+  // does not hide the thing you are shooting at
+  const bead = document.createElementNS(NS, 'circle');
+  bead.setAttribute('fill', 'none');
+  bead.setAttribute('stroke', '#0b0f13');
+  bead.setAttribute('stroke-width', '2.2');
+  bead.setAttribute('stroke-opacity', '0.9');
+  reticle.append(...aaRings, ...posts, bead);
+
   graticule.append(...hair, ...ticks, pip);
-  svg.append(defs, shade, ...rings.map((r) => r.g), graticule);
+  svg.append(defs, shade, ...rings.map((r) => r.g), reticle, graticule);
 
   const range = document.createElement('div');
   range.className = 'plate range';
@@ -186,18 +277,65 @@ export function createGunsight() {
   const shellLabel = panel.querySelector('.s');
   const mags = [...panel.querySelectorAll('[data-m]')];
 
+  const aapanel = document.createElement('div');
+  aapanel.className = 'plate aapanel';
+  aapanel.innerHTML = '<div><b>Mounting</b><i class="m"></i></div>'
+    + '<div><b>Rounds</b><i class="r"></i></div>'
+    + '<div><b>Barrels</b><span class="heat"><u></u><s></s></span></div>'
+    + '<div><b>Bearing</b><i class="b"></i></div>'
+    + '<div><b>Elevation</b><i class="e"></i></div>';
+  const aaMount = aapanel.querySelector('.m');
+  const aaRounds = aapanel.querySelector('.r');
+  const aaHeat = aapanel.querySelector('.heat u');
+  const aaCease = aapanel.querySelector('.heat s');
+  const aaBearing = aapanel.querySelector('.b');
+  const aaElev = aapanel.querySelector('.e');
+
+  const warn = document.createElement('div');
+  warn.className = 'warn';
+
   const hint = document.createElement('div');
   hint.className = 'hint';
-  hint.textContent = 'MOUSE = lay · CLICK = fire · 1/2/3 = shell · Z = magnification · E or ESC = leave the gun';
+  const HINTS = {
+    turret: 'MOUSE = lay · CLICK = fire · Z = magnification · E or ESC = leave the gun',
+    aa: 'MOUSE = lay · HOLD CLICK = fire · watch the barrels · E or ESC = leave the gun',
+  };
+  hint.textContent = HINTS.turret;
 
   const load = document.createElement('div');
   load.className = 'load';
 
-  root.append(range, panel, hint, load);
+  // Over everything, including the graticule — see the note in the CSS.
+  const dazzle = document.createElement('div');
+  dazzle.className = 'dazzle';
+
+  root.append(range, panel, aapanel, hint, load, warn, dazzle);
   document.body.append(root);
 
   let w = 0;
   let h = 0;
+  // Which gun's sight is on the glass, and what field of view it is looking
+  // through. The field matters because the ring sight's radii are angles: a
+  // thirteen-degree ring is a different number of pixels in a fifty-eight degree
+  // field than in a three-degree one, and the whole point of a ring is that the
+  // lead it stands for does not change when the picture does.
+  let mode = 'turret';
+  let field = 55;
+
+  // Everything that is one sight and not the other. Done by hiding rather than
+  // by building two sights, because the pip, the dazzle and the plates are
+  // common to both and there is nothing to be gained by having two of each.
+  function applyMode() {
+    const aa = mode === 'aa';
+    root.classList.toggle('aa', aa);
+    hint.textContent = HINTS[mode];
+    shade.setAttribute('display', aa ? 'none' : 'inline');
+    for (const r of rings) r.g.setAttribute('display', aa ? 'none' : 'inline');
+    for (const l of hair) l.setAttribute('display', aa ? 'none' : 'inline');
+    for (const l of ticks) l.setAttribute('display', aa ? 'none' : 'inline');
+    reticle.setAttribute('display', aa ? 'inline' : 'none');
+    layout();
+  }
 
   function layout() {
     w = innerWidth; h = innerHeight;
@@ -217,10 +355,13 @@ export function createGunsight() {
     });
     fieldRect.setAttribute('x', 0); fieldRect.setAttribute('y', 0);
     fieldRect.setAttribute('width', w); fieldRect.setAttribute('height', h);
+    // In the binocular sight the graticule is clipped to the eyecups, because
+    // the wires are inside the tube. An open ring sight has no tube, so the mask
+    // is opened right out and the pip may go anywhere on the glass.
     fieldHoles.forEach((c, i) => {
-      c.setAttribute('cx', cx(i));
+      c.setAttribute('cx', mode === 'aa' ? w / 2 : cx(i));
       c.setAttribute('cy', cy);
-      c.setAttribute('r', r);
+      c.setAttribute('r', mode === 'aa' ? Math.hypot(w, h) : r);
     });
     rimMasks.forEach((m, i) => {
       m.rect.setAttribute('x', 0); m.rect.setAttribute('y', 0);
@@ -259,6 +400,35 @@ export function createGunsight() {
       l.setAttribute('x1', w / 2 - len); l.setAttribute('x2', w / 2 + len);
       l.setAttribute('y1', y); l.setAttribute('y2', y);
     });
+    if (mode === 'aa') layoutReticle();
+  }
+
+  // The ring sight, sized off the field of view rather than off the window.
+  // `half` is the projection: half the picture's height is tan(fov/2) of range,
+  // so an angle theta lands at tan(theta)/tan(fov/2) of that.
+  let ringDeg = 13.5;
+  let innerDeg = 6.2;
+  function layoutReticle() {
+    const cy = h / 2;
+    const cxm = w / 2;
+    const half = Math.tan((field / 2) * (Math.PI / 180));
+    const px = (deg) => (Math.tan(deg * (Math.PI / 180)) / half) * (h / 2);
+    const R = px(ringDeg);
+    const r2 = px(innerDeg);
+    aaRings[0].setAttribute('cx', cxm); aaRings[0].setAttribute('cy', cy);
+    aaRings[0].setAttribute('r', r2);
+    aaRings[1].setAttribute('cx', cxm); aaRings[1].setAttribute('cy', cy);
+    aaRings[1].setAttribute('r', R);
+    // the posts, standing out from the outer ring
+    const out = R * 1.22;
+    const dirs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    posts.forEach((l, i) => {
+      const [dx, dy] = dirs[i];
+      l.setAttribute('x1', cxm + dx * R); l.setAttribute('y1', cy + dy * R);
+      l.setAttribute('x2', cxm + dx * out); l.setAttribute('y2', cy + dy * out);
+    });
+    bead.setAttribute('cx', cxm); bead.setAttribute('cy', cy);
+    bead.setAttribute('r', Math.max(3, px(0.55)));
   }
   addEventListener('resize', layout);
   layout();
@@ -268,24 +438,87 @@ export function createGunsight() {
     show(on) {
       root.classList.toggle('on', !!on);
       if (on) layout();
+      if (!on) { flash.t = 1e3; dazzle.style.opacity = '0'; }
+    },
+
+    // The gun fired. Full white at once — a dazzle that fades *in* is a lamp —
+    // and then a long slow recovery, which is the whole point: the flash is gone
+    // in a third of a second and the eye is not.
+    fire(strength = 1) {
+      flash.t = 0;
+      flash.mag = Math.min(1, strength);
+      // Written here and not left to the next `step`: a frame of black between
+      // the guns going off and the white arriving is very visible.
+      dazzle.style.opacity = String(flash.mag);
+    },
+
+    // Advanced from the frame loop, because it has to fade on wall time rather
+    // than on however often anybody happens to call `set`.
+    step(dt) {
+      if (flash.t > DAZZLE.life) return;
+      flash.t += dt;
+      const u = Math.min(flash.t / DAZZLE.life, 1);
+      // Off full quickly and then a long dim tail — half gone by a third of a
+      // second, but still washing the picture a second later. A straight `1 - u`
+      // comes back far too evenly and reads as a dimmer being wound down.
+      const a = flash.mag * (1 - u) ** DAZZLE.falloff;
+      dazzle.style.opacity = String(a);
     },
     // `dx`/`dy` are the demand's offset from the guns, in fractions of the
     // vertical field of view. That is what puts the pip in the right place at
     // any magnification without this file having to know what a magnification is.
     set(state) {
-      rangeValue.textContent = state.range > 0 ? Math.round(state.range) : '—';
-      turretLabel.textContent = state.turret;
-      shellLabel.textContent = state.shell;
+      const want = state.mode || 'turret';
+      const wantField = state.field || field;
+      if (want !== mode || Math.abs(wantField - field) > 0.01
+        || (state.ring && Math.abs(state.ring - ringDeg) > 0.01)) {
+        mode = want;
+        field = wantField;
+        if (state.ring) ringDeg = state.ring;
+        if (state.innerRing) innerDeg = state.innerRing;
+        applyMode();
+      }
+      if (mode === 'aa') {
+        aaMount.textContent = state.mount;
+        aaRounds.textContent = `${state.rounds}/${state.clip}`;
+        aaRounds.style.color = state.reload > 0 ? '#ff8a5c'
+          : (state.rounds < state.clip * 0.25 ? '#ffd479' : '#dfe6ea');
+        aaHeat.style.width = `${Math.round(state.heat * 100)}%`;
+        // Where the gun gives up, marked on the gauge. The bar is not a health
+        // bar: what it is telling you is how long a burst you have left, and
+        // that is only readable if the cut-off is drawn on it.
+        aaCease.style.left = '100%';
+        aaBearing.textContent = `${((Math.round(state.bearing) + 360) % 360).toString().padStart(3, '0')}°`;
+        aaElev.textContent = `${state.elevation.toFixed(0)}°`;
+        // One line, and it says the most urgent true thing. Order matters: a gun
+        // that will not fire because its barrels are cooked should say so before
+        // it mentions that it is also pointing at the mainmast.
+        warn.textContent = state.ceased ? 'BARRELS COOKED — CEASE FIRE'
+          : state.reload > 0 ? `LOADERS REFILLING  ${state.reload.toFixed(1)}s`
+            : state.cutout ? `CUT-OUT — GUNS HELD AT ${state.floor.toFixed(0)}°`
+              : '';
+        load.textContent = '';
+      } else {
+        warn.textContent = '';
+        rangeValue.textContent = state.range > 0 ? Math.round(state.range) : '—';
+        turretLabel.textContent = state.turret;
+        shellLabel.textContent = state.shell;
+        load.textContent = state.reload > 0
+          ? `RELOADING ${state.reload.toFixed(1)}s`
+          : '';
+      }
       mags.forEach((el) => el.classList.toggle('sel', Number(el.dataset.m) === state.mag));
-      load.textContent = state.reload > 0
-        ? `RELOADING ${state.reload.toFixed(1)}s`
-        : (state.onTarget ? '' : '');
       const px = w / 2 + state.dx * h;
       const py = h / 2 - state.dy * h;
       pipRing.setAttribute('cx', px); pipRing.setAttribute('cy', py);
       pipDot.setAttribute('cx', px); pipDot.setAttribute('cy', py);
       const off = Math.hypot(state.dx, state.dy) > 0.004;
       pip.setAttribute('opacity', off ? '1' : '0.25');
+      // Held at the rim because the guns are further off the line than the glass
+      // is wide. The ring alone then reads as a bearing to them rather than as
+      // where they are pointing, which is the honest thing to say — dropping the
+      // dot is the whole of the difference and it is enough.
+      pipDot.setAttribute('opacity', state.far ? '0' : '1');
     },
     dispose() { root.remove(); style.remove(); },
   };

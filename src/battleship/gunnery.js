@@ -1,12 +1,12 @@
 import {
   Group, Mesh, Sprite, SpriteNodeMaterial, MeshBasicNodeMaterial, LatheGeometry,
-  Raycaster, Vector2, Vector3, Quaternion, Color, AdditiveBlending,
+  Raycaster, Vector2, Vector3, Quaternion, Color, AdditiveBlending, Box3, Matrix4,
 } from 'three/webgpu';
 import {
   Fn, vec3, vec4, float, uv, dot, saturate, normalize, normalWorld, attribute, pow,
 } from 'three/tsl';
 import {
-  SHELL, flightStep, aimAt, elevationThrough, rangeFor, elevationFor, maxRange,
+  SHELL, AA_ROUND, flightStep, aimAt, elevationThrough, rangeFor, elevationFor, maxRange,
 } from './ballistics.js';
 
 // Shells in the air.
@@ -31,9 +31,10 @@ import {
 // Everything about the round itself now lives in ballistics.js. Re-exported
 // because half the project asks the gunnery for it and there is no reason to
 // make every one of those callers know where it came from.
-export { SHELL, aimAt, elevationThrough, rangeFor, elevationFor, maxRange };
+export { SHELL, AA_ROUND, aimAt, elevationThrough, rangeFor, elevationFor, maxRange };
 
 const FORWARD = new Vector3(0, 0, 1);
+const AXES = ['x', 'y', 'z'];
 
 const isVisible = (o) => {
   for (let n = o; n; n = n.parent) if (!n.visible) return false;
@@ -96,6 +97,41 @@ function shellGeometry() {
   return g;
 }
 
+// --- and what the stern mounting's round looks like ---------------------------
+//
+// Thirty centimetres of 40 mm high explosive, which at the ranges it is fired
+// over is a fifth of a pixel: honestly drawn it is invisible, exactly as the
+// 16-inch shell is, and the answer is the same one — the trace carries it. So
+// the body is four lines of lathe rather than a profile with driving bands on
+// it, because nobody has ever seen one and nobody will.
+//
+// What is worth having is the *base*. A tracer burns out of the back of the
+// round the whole way to the fuze, so the base is drawn as a hot disc and the
+// glow behind it is the round's real signature. Coloured by hand rather than
+// shaded: a lamp is not lit by the sun.
+function tracerGeometry(proj) {
+  const R = proj.caliber / 2;
+  const L = proj.length;
+  const g = new LatheGeometry([
+    new Vector2(0, 0),
+    new Vector2(R, L * 0.06), // the base, square, with the tracer in it
+    new Vector2(R, L * 0.62), // parallel body
+    new Vector2(R * 0.72, L * 0.86), // and a stubby ogive; it is not a rifle round
+    new Vector2(R * 0.10, L),
+  ], 8);
+  g.rotateX(Math.PI / 2);
+  const pos = g.getAttribute('position');
+  const col = new Float32Array(pos.count * 3);
+  const body = new Color(0.10, 0.10, 0.11);
+  const lit = new Color(3.0, 1.6, 0.5); // the tracer composition, burning
+  for (let i = 0; i < pos.count; i++) {
+    const c = pos.getZ(i) < L * 0.09 ? lit : body;
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  g.setAttribute('color', new (pos.constructor)(col, 3));
+  return g;
+}
+
 // Nothing in this project uses three's lighting model — see scene/shading.js —
 // so the shell is shaded by hand off the same sun the ship and the sea are lit
 // by. Two terms: the sun, and the sky it is sitting under. A shell drawn flat is
@@ -120,6 +156,16 @@ function shellMaterial(shading) {
   return m;
 }
 
+// A tracer is not lit, it is *alight*. Same vertex colours, no sun in the graph,
+// no tone mapping — a burning composition is brighter than the frame in daylight
+// and it is the only thing you can see of the round at night.
+function tracerMaterial() {
+  const m = new MeshBasicNodeMaterial();
+  m.vertexColors = true;
+  m.toneMapped = false;
+  return m;
+}
+
 // The trace.
 //
 // A 406 mm shell is 40 cm across and four kilometres away: a fortieth of a pixel.
@@ -128,13 +174,13 @@ function shellMaterial(shading) {
 // each round carries a soft additive mote that holds a minimum *angular* size, in
 // the way a tracer or the sun on a wet shell holds one. Near the muzzle it is
 // smaller than the shell and never seen; at range it is what you follow.
-function glowMaterial() {
+function glowMaterial(color = [1.0, 0.86, 0.62], strength = 0.5, falloff = 2.2) {
   const m = new SpriteNodeMaterial();
   m.colorNode = Fn(() => {
     const p = uv().sub(0.5).mul(2);
     const r2 = dot(p, p);
-    const a = pow(saturate(float(1).sub(r2)), float(2.2));
-    return vec4(vec3(1.0, 0.86, 0.62), a.mul(0.5));
+    const a = pow(saturate(float(1).sub(r2)), float(falloff));
+    return vec4(vec3(...color), a.mul(strength));
   })();
   m.transparent = true;
   m.depthWrite = false;
@@ -143,17 +189,136 @@ function glowMaterial() {
   return m;
 }
 
-export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
+// `max` is how many projectiles may be in the air at once, and it is a great
+// deal larger than it was: a main battery salvo is two rounds every six seconds
+// and the stern mounting is nine rounds a second for as long as the trigger is
+// held. Nothing here costs anything while the pools are empty.
+export function createGunnery({ shading = null, smoke = null, max = 200 } = {}) {
   const group = new Group();
   group.name = 'gunnery.shells';
   group.frustumCulled = false;
 
-  const geometry = shellGeometry();
-  const material = shellMaterial(shading);
-  const glowMat = glowMaterial();
+  // --- one set of drawing gear per projectile ---------------------------------
+  //
+  // The ship fires two entirely different things — a tonne of armour-piercing
+  // shell and a kilogramme of tracer — and they share the integrator, the hit
+  // test and the pool machinery while sharing none of the *look*. So the
+  // per-projectile parts (geometry, material, the colour and size of the mote
+  // that stands in for it at range, and its own free list) are built once, on
+  // the first round of that kind fired, and hung off the projectile itself.
+  const kinds = new Map();
+  function kindFor(proj) {
+    let k = kinds.get(proj);
+    if (k) return k;
+    const isTracer = !!proj.tracer;
+    k = {
+      proj,
+      tracer: isTracer,
+      geometry: isTracer ? tracerGeometry(proj) : shellGeometry(),
+      material: isTracer ? tracerMaterial() : shellMaterial(shading),
+      // A tracer's mote is smaller, tighter and much brighter than a shell's —
+      // it is a burning composition rather than sunlight on wet steel, and what
+      // it has to read as is a *point* of light travelling, not a soft blob.
+      glowMat: isTracer ? glowMaterial(proj.tracer, 0.95, 1.4) : glowMaterial(),
+      angular: isTracer ? 0.0021 : 0.0016,
+      // Never smaller than this, so a round passing close by is still a spark
+      // and not thirty centimetres of dark metal you cannot see.
+      minSize: isTracer ? proj.length * 4 : proj.length * 0.5,
+      pool: [],
+    };
+    kinds.set(proj, k);
+    return k;
+  }
+
+  // --- the broad phase ----------------------------------------------------------
+  //
+  // Every round in the air raycasts along the segment it swept, against a ship
+  // that is several hundred separate meshes. That is exact and it is the right
+  // answer — see the note at the head of this file — and it costs almost nothing
+  // when the thing in the air is two rounds every six seconds.
+  //
+  // The stern mounting puts forty in the air at once. A raycast through her costs
+  // the better part of two milliseconds; forty of them a frame is eighty, which
+  // is not a frame rate. So every segment is first tested against the target's
+  // own bounding box, and one that comes nowhere near it never touches the
+  // raycaster at all. A burst spends a tenth of a second inside her bounds and
+  // the other four seconds outside them, so almost all of the work disappears.
+  //
+  // A *box*, and in the target's own frame rather than a sphere in the world.
+  // The sphere is two lines shorter and it is much too generous on a hull this
+  // shape: 180 m long by 30 across gives a sphere 96 m in radius, so a round
+  // passing fifty metres abeam — which is most of a burst — would still pay for
+  // a full traversal. Transforming the two ends of the segment into her frame
+  // costs two matrix multiplies and buys the real shape.
+  //
+  // The box is measured once per target and then carried by its matrix, because
+  // a hull is rigid: walking a few hundred meshes every frame to discover it is
+  // still the same size would cost more than the test it is meant to save.
+  const bounds = new Map();
+  const _a = new Vector3();
+  const _b = new Vector3();
+
+  function boundsFor(obj) {
+    let bx = bounds.get(obj);
+    if (!bx) {
+      const box = new Box3().setFromObject(obj);
+      // her own frame: the world box is axis-aligned to the sea, and she turns
+      const min = obj.worldToLocal(box.min.clone());
+      const max = obj.worldToLocal(box.max.clone());
+      const M = 3; // margin, for guns run out and anything that has since moved
+      bx = {
+        lo: new Vector3(
+          Math.min(min.x, max.x) - M, Math.min(min.y, max.y) - M, Math.min(min.z, max.z) - M,
+        ),
+        hi: new Vector3(
+          Math.max(min.x, max.x) + M, Math.max(min.y, max.y) + M, Math.max(min.z, max.z) + M,
+        ),
+        // world -> her frame, refreshed once a frame rather than once a round:
+        // forty rounds against two hulls is eighty matrix inversions a frame, and
+        // the answer is the same for all of them.
+        inv: new Matrix4(),
+      };
+      bounds.set(obj, bx);
+    }
+    return bx;
+  }
+
+  // Does the segment from `p0` to `p1` touch any target's box? The standard slab
+  // test, run in each target's own frame.
+  function refreshBounds(targets) {
+    for (const t of targets) boundsFor(t).inv.copy(t.matrixWorld).invert();
+  }
+
+  function nearAny(targets, p0, p1) {
+    for (const t of targets) {
+      const bx = bounds.get(t);
+      _a.copy(p0).applyMatrix4(bx.inv);
+      _b.copy(p1).applyMatrix4(bx.inv);
+      let t0 = 0;
+      let t1 = 1;
+      let out = false;
+      for (const ax of AXES) {
+        const a = _a[ax];
+        const d = _b[ax] - a;
+        const lo = bx.lo[ax];
+        const hi = bx.hi[ax];
+        if (Math.abs(d) < 1e-9) {
+          if (a < lo || a > hi) { out = true; break; }
+        } else {
+          let n = (lo - a) / d;
+          let f = (hi - a) / d;
+          if (n > f) { const k = n; n = f; f = k; }
+          if (n > t0) t0 = n;
+          if (f < t1) t1 = f;
+          if (t0 > t1) { out = true; break; }
+        }
+      }
+      if (!out) return true;
+    }
+    return false;
+  }
 
   const live = [];
-  const pool = [];
   const ray = new Raycaster();
   const _step = new Vector3();
   const _prev = new Vector3();
@@ -175,22 +340,23 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
   // to the line of fire is a couple of metres of deflection at four thousand — a
   // small thing that is free to have and wrong to leave out.
   function fire(origin, direction, {
-    owner = null, clearOf = null, inherit = null, speed = SHELL.muzzle,
+    owner = null, clearOf = null, inherit = null, proj = SHELL, speed = null,
   } = {}) {
     if (live.length >= max) retire(0);
-    let s = pool.pop();
+    const kind = kindFor(proj);
+    let s = kind.pool.pop();
     if (!s) {
-      const mesh = new Mesh(geometry, material);
+      const mesh = new Mesh(kind.geometry, kind.material);
       mesh.frustumCulled = false;
-      const glow = new Sprite(glowMat);
+      const glow = new Sprite(kind.glowMat);
       glow.frustumCulled = false;
       glow.renderOrder = 22;
-      s = { mesh, glow, vel: new Vector3(), spin: 0 };
+      s = { mesh, glow, vel: new Vector3(), spin: 0, kind, proj };
     }
     s.mesh.position.copy(origin);
     s.mesh.visible = true;
     s.glow.visible = true;
-    s.vel.copy(direction).normalize().multiplyScalar(speed);
+    s.vel.copy(direction).normalize().multiplyScalar(speed ?? proj.muzzle);
     if (inherit) s.vel.add(inherit);
     s.age = 0;
     s.spin = 0;
@@ -210,7 +376,7 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
     group.remove(s.glow);
     s.mesh.visible = false;
     s.glow.visible = false;
-    pool.push(s);
+    s.kind.pool.push(s);
     live.splice(i, 1);
   }
 
@@ -234,10 +400,16 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
   // `onHit` gets the intersection plus the shell that made it; `onMiss` fires
   // when one goes into the sea instead. `wind` is the air the shells are flying
   // through, and `camera` is only for how big to draw the trace.
+  // `onBurst` is a round destroying itself in the air at the end of its fuze —
+  // see AA_ROUND in ballistics.js. It is not a miss and it is not a hit: it is
+  // the round doing what it was built to do, and what it leaves behind is the
+  // black puff that makes a sky full of them read as flak.
   function update(dt, {
-    target, seaHeight = 0, onHit = null, onMiss = null, wind = null, camera = null,
+    target, seaHeight = 0, onHit = null, onMiss = null, onBurst = null,
+    wind = null, camera = null,
   }) {
     const targets = target && Array.isArray(target) ? target : (target ? [target] : null);
+    if (targets && live.length) refreshBounds(targets);
     const air = wind || NO_WIND;
     for (let i = live.length - 1; i >= 0; i--) {
       const s = live[i];
@@ -250,7 +422,7 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
       let left = dt;
       while (left > 1e-5) {
         const h = Math.min(left, 1 / 90);
-        flightStep(s.mesh.position, s.vel, h, air);
+        flightStep(s.mesh.position, s.vel, h, air, s.proj);
         left -= h;
       }
 
@@ -259,7 +431,7 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
       _step.subVectors(s.mesh.position, _prev);
       const dist = _step.length();
 
-      if (targets && dist > 1e-4) {
+      if (targets && dist > 1e-4 && nearAny(targets, _prev, s.mesh.position)) {
         ray.set(_prev, _dir.copy(_step).divideScalar(dist));
         ray.far = dist;
         // A wrecked stretch of guardrail is hidden rather than removed, and the
@@ -288,15 +460,43 @@ export function createGunnery({ shading = null, smoke = null, max = 64 } = {}) {
       // A trace of vapour every so many metres of flight, for the first stretch
       // of the run where it is worth anything. Beyond that it is a smear across
       // half the sky and thousands of particles.
+      // ...and only for the main battery. A tracer's trace is the tracer; a
+      // vapour trail behind nine rounds a second is a thousand particles a
+      // second and a smear across the whole quarter.
       s.trail += dist;
-      if (smoke && s.age < 5 && s.trail > 55) { s.trail = 0; trail(s); }
+      if (smoke && !s.kind.tracer && s.age < 5 && s.trail > 55) { s.trail = 0; trail(s); }
 
       // The mote that stands in for a shell too far away to have a size — see
       // `glowMaterial`. Held at about a milliradian, so it is the same speck at
       // any range and is swallowed by the shell itself up close.
+      //
+      // ...and a tracer burns out. The composition in the base of the round
+      // lasts a few seconds and then there is nothing in it left to burn, so the
+      // last stretch of the flight is dark and the burst at the end of the fuze
+      // appears out of an empty sky — which is precisely what anti-aircraft fire
+      // looks like from underneath, and is free.
       s.glow.position.copy(s.mesh.position);
-      const d = camera ? camera.position.distanceTo(s.mesh.position) : 400;
-      s.glow.scale.setScalar(Math.max(SHELL.length * 0.5, d * 0.0016));
+      const burn = s.proj.tracerLife
+        ? Math.max(0, 1 - Math.max(0, s.age - s.proj.tracerLife) / 0.5)
+        : 1;
+      if (burn <= 0) {
+        s.glow.visible = false;
+      } else {
+        s.glow.visible = true;
+        const d = camera ? camera.position.distanceTo(s.mesh.position) : 400;
+        s.glow.scale.setScalar(Math.max(s.kind.minSize, d * s.kind.angular) * burn);
+      }
+
+      // The fuze. A self-destructing round has a life measured from the muzzle
+      // rather than a range set on it, which is what the tracer round actually
+      // carries: it burns for so long and then it goes off, wherever it has got
+      // to. Checked after the hit test, so a round that reaches its target on
+      // the last tenth of its fuze still hits it.
+      if (s.proj.fuze && s.age >= s.proj.fuze) {
+        if (onBurst) onBurst({ point: s.mesh.position.clone(), shell: s });
+        retire(i);
+        continue;
+      }
 
       // into the sea, or so far out it is never coming back. The cap is a long
       // one now: a shell fired at the elevation stop is in the air for the best

@@ -189,6 +189,13 @@ export function createBoat(renderer, {
   const _t = new Vector3();
   const _v = new Vector3();
   const _q = new Quaternion();
+  const _jr = new Vector3();
+  const _jw = new Vector3();
+  const _jq = new Quaternion();
+  // What she actually weighs at the moment, flood water included. Kept out here
+  // because `impulseAt` lands between frames and a ship with three thousand
+  // tonnes of sea in her should take a blow more heavily than a dry one.
+  let liveMass = c0.mass;
   const force = new Vector3();
   const torque = new Vector3();
 
@@ -345,6 +352,7 @@ export function createBoat(renderer, {
     // sluggish. Leaving it out of the denominator would have her accelerate
     // downward as though the sea were pushing.
     const mEff = c.mass + floodMass;
+    liveMass = mEff; // so a blow landed between frames uses the mass she has now
 
     const wetFrac = wet / PROBES.length;
     const vFwd = velocity.dot(fwd);
@@ -718,6 +726,38 @@ export function createBoat(renderer, {
     // of a blow and none of the swing, which is the right answer for 42,000
     // tonnes being nudged by a launch.
     angVel,
+    // A blow, delivered instantly: `impulse` is N.s in world axes, `at` is the
+    // point in the world it lands on. Δv = J/m and Δω = I⁻¹(r × J), the whole of
+    // rigid-body impulse response — which is all a gun going off is.
+    //
+    // Instant is not a shortcut. A sixteen-inch gun is back in battery inside a
+    // couple of seconds and the pressure that shoves her is spent in a tenth of
+    // one, against a roll period of fifteen: spreading it over a substep would
+    // change the answer in the fourth decimal place and cost a queue.
+    //
+    // Going through here rather than poking `angVel` directly is what makes the
+    // *position* of the blow matter. A superfiring turret has a longer lever on
+    // her than the one below it, a gun at high elevation puts less of its shove
+    // across her and more of it down through her, and a hit forward pitches her
+    // — none of which has to be written down anywhere. It falls out of `at`.
+    //
+    // The yaw component survives on a free hull and is discarded on a conned one
+    // (the handling model owns the swing — see below). That is the right answer
+    // and not a limitation: a broadside is worth two hundredths of a degree a
+    // second of yaw, which is nothing beside her rudder.
+    impulseAt(impulse, at) {
+      velocity.addScaledVector(impulse, 1 / liveMass);
+      _jr.copy(at).sub(position);
+      _jw.crossVectors(_jr, impulse); // angular impulse, world axes
+      // Into her own frame, where the inertia is the diagonal above, and back.
+      _jw.applyQuaternion(_jq.copy(quaternion).invert());
+      _jw.set(
+        _jw.x / (inertiaPerKg.x * liveMass),
+        _jw.y / (inertiaPerKg.y * liveMass),
+        _jw.z / (inertiaPerKg.z * liveMass),
+      ).applyQuaternion(quaternion);
+      angVel.add(_jw);
+    },
     // The drawn rotation, which carries the handling model's cosmetic heel on
     // top of the physics one. The ocean's contact wash follows this rather than
     // `quaternion`, so the wash stays glued to the hull you can actually see.

@@ -1,7 +1,7 @@
 import { Group, Mesh, Vector3, Quaternion, Matrix4 } from 'three/webgpu';
 import { createShipMaterials, paint } from './shipMaterial.js';
 import {
-  SHIP, COMPARTMENTS, TURRETS, TURRET_SPEC, AA_MOUNTS, SUPER, COMPONENT_STATS,
+  SHIP, COMPARTMENTS, TURRETS, TURRET_SPEC, AA_MOUNTS, STERN_AA, SUPER, COMPONENT_STATS,
   assertOnDeckhouse,
 } from './spec.js';
 import {
@@ -9,6 +9,7 @@ import {
   checkSuperfiringClearance, DECK_COLOR, STEEL, deckAt, sideAt, keelAt, PLATING,
 } from './hull.js';
 import { createMainTurret, createAAMount } from './mounts.js';
+import { createSternAA } from './sternAA.js';
 import {
   buildBridge, buildFunnel, buildMainmast, buildDeckhouses, buildDecor,
   buildSteering, buildScrews,
@@ -31,6 +32,7 @@ import { createStructure } from './structure.js';
 import { createFittings } from './fittings.js';
 import { createFlooding } from './flooding.js';
 import { createShards } from './shards.js';
+import { createSpentCases } from './cases.js';
 import { createBurst } from './burst.js';
 import { buildTornPlating } from './plating.js';
 import { STRUCTURE, WOUNDS, BUOYANCY } from './spec.js';
@@ -168,7 +170,13 @@ export function createBattleship({
   // into the scene rather than under `root` (main.js adds it). Splashes are the
   // launch's droplet system — a piece of steel going into the sea throws water,
   // and water is water.
-  const splash = createHullSpray({ shading, count: 3000 });
+  // A single shell splash is about eight hundred and fifty droplets and now
+  // stands for eight seconds rather than four, so a six-gun broadside that all
+  // misses is five thousand in the air and two overlapping salvos are ten. The
+  // pool costs almost nothing to carry: integrating 10,400 live droplets
+  // measures at 0.045 ms a frame, and dead slots are a skip in that loop and a
+  // zero-sized sprite on the GPU.
+  const splash = createHullSpray({ shading, count: 12000 });
   const shipVelocity = new Vector3();
   const _dq = new Quaternion();
   const _splashUp = new Vector3(0, 1, 0);
@@ -263,6 +271,19 @@ export function createBattleship({
     damageUniforms.set(t.id, m.damage);
   }
 
+  // --- the stern mounting ------------------------------------------------------
+  //
+  // Where Y turret stood. Built before the light tubs because it is a heavier
+  // thing than they are in every sense — it is on the hull rather than on a
+  // deckhouse, it has its own hit points, and it is the only mount on the ship
+  // besides the four turrets that a player can sit behind. See sternAA.js.
+  const sternAA = createSternAA({ materials });
+  sternAA.root.position.set(0, deckY(STERN_AA.z), zOf(STERN_AA.z));
+  root.add(sternAA.root);
+  mounts.set(STERN_AA.id, sternAA);
+  parts.set(STERN_AA.id, { object: sternAA.root, damage: sternAA.damage });
+  damageUniforms.set(STERN_AA.id, sternAA.damage);
+
   // --- AA mounts -------------------------------------------------------------
   const aaMounts = [];
   for (const a of AA_MOUNTS) {
@@ -302,6 +323,11 @@ export function createBattleship({
   // that is expressible as one float per compartment.
   const flooding = createFlooding();
   const shards = createShards({ shading });
+  // The brass her automatic throws away. A child of the hull rather than of the
+  // scene, because a cartridge case lands on the deck it was fired from and that
+  // deck is under way — see cases.js.
+  const cases = createSpentCases({ shading });
+  root.add(cases.mesh);
   const burst = createBurst({ fx, splash, shards });
   // The large pieces of plating a burst takes off her. One set of geometries for
   // the whole ship; see plating.js for why these are bodies and the shards are
@@ -370,6 +396,23 @@ export function createBattleship({
         if (structure) structure.weaken(m.id, 0.7);
       },
       onRepair: () => { m.restore(); },
+    });
+  }
+  {
+    const stats = COMPONENT_STATS[STERN_AA.id];
+    damage.add({
+      id: STERN_AA.id,
+      hp: stats.hp,
+      armor: stats.armor,
+      group: 'aa',
+      damage: sternAA.damage,
+      z: STERN_AA.z,
+      critical: stats.critical || [],
+      // Nothing to weaken underneath it: it stands on an armoured ring built
+      // into the hull, so a kill is the mounting wrecked in place with its
+      // barrels down, and not a tub going over the side.
+      onKill: () => { sternAA.kill(); },
+      onRepair: () => { sternAA.restore(); },
     });
   }
   for (const id of ['bridge', 'funnel', 'mainmast', 'steering', 'screws']) {
@@ -456,6 +499,7 @@ export function createBattleship({
     ...superUnits.flatMap((un) => un.lamps || []),
     // and the red ones inside the turrets, which the mounts report the same way
     ...turrets.flatMap((m) => m.lamps || []),
+    ...(sternAA.lamps || []),
   ];
   materials.setLamps(shipLamps);
   // And bake what stops them. Done here, once, after both halves are known: the
@@ -712,6 +756,155 @@ export function createBattleship({
       if (cpt) damage.hit(cpt.id, { damage: 22, pen: 999, fire: 0.5 });
     }
   }
+  // A shell going into the sea.
+  //
+  // The column is the whole point of it: it is how a gunner spots his fall of
+  // shot, it stands there for seconds, and against a ship it is the thing that
+  // tells you how close somebody came.
+  //
+  // What a real one does, in order, is:
+  //
+  //   - throw a flat white sheet of ejecta out of the surface on contact,
+  //   - open a ragged crown of spray around the entry point,
+  //   - and *then* — a moment later, out of the cavity the shell left — drive a
+  //     tall narrow column up, which spreads at its head as it decelerates and
+  //     falls back as a curtain,
+  //   - leaving a low foam ring spreading across the water behind it.
+  //
+  // The order matters as much as the parts. Firing them all on the same frame
+  // is what made the old one read as a fountain: everything left the surface
+  // together, so there was no cavity, no column climbing out of anything, and
+  // nothing to say which bit caused which. `queue` below is what buys the delay.
+  //
+  // The mushroom head is `flare` in hullSpray.burst — see the note there. It is
+  // not a wide cone: a cone gives you a fan, because the launch angle and the
+  // launch speed are drawn independently, so the droplets at the top are no
+  // more spread than the ones at the bottom.
+  const SPLASH = {
+    // Launch speeds, in m/s, as `base + v * gain` where `v` is roughly how big
+    // the shell was. Each burst is drawn over 0.55..1.45 of its figure, so the
+    // top of the column is set by the fast tail and the stem by the slow one —
+    // which is what grades it instead of launching a slab.
+    sheet: [16, 11], crown: [18, 11], stem: [26, 12], cap: [30, 13], surge: [9, 7],
+
+    // How fast each part sheds speed, 1/s. This is the number that decides how
+    // the splash *comes down*, and it is the one that was wrong: everything ran
+    // at sprayConfig.drag, which is the figure for mist, and mist falls at three
+    // and a half metres a second. The column went up in a second and took nine
+    // to come back — snow, not water.
+    //
+    // A shell does not throw mist. The column and its head are lumps of solid
+    // water, and a lump of water falls at fifteen to twenty metres a second, so
+    // they get a drag to match and come down in about the time they went up.
+    // The contact sheet and the base surge really *are* atomised, so those keep
+    // the mist figure and are meant to hang.
+    columnDrag: 0.6, // terminal 16 m/s — the column and its head
+    crownDrag: 1.2, // terminal 8 m/s — coarse spray, between the two
+
+    rim: [3.0, 3.2], // radius the crown opens at
+    sectors: 11, // ...built as this many separate jets, so it comes up ragged
+    columnAt: 0.07, // s after contact that the column starts to climb
+    surgeAt: 0.55, // s after contact that the crown's collapse spreads out
+    // Fraction of its own speed the head throws sideways. Much smaller than it
+    // looks: radial spread survives as long as the drag lets it, and at the
+    // column's drag a given sideways kick carries nearly five times as far as it
+    // did at the mist figure.
+    capFlare: 0.17,
+    // Long, because the column now has to survive its whole flight. A droplet
+    // that runs out of life at the top of its arc does not fall at all — it
+    // vanishes, which was the other half of why the old one never came down.
+    // Landing kills them well before this; see `settle` in hullSpray.
+    columnLife: 11,
+  };
+
+  // Stages waiting to fire. Splashes are rare enough — a few a second at the
+  // very worst — that a list of pending ones costs nothing to walk each frame.
+  const splashQueue = [];
+  const _splashAt = new Vector3();
+  const _crownAt = new Vector3();
+  const _crownDir = new Vector3();
+  let lastSea = FLAT_SEA;
+
+  // Where the water actually is under a point. The shell is retired on the
+  // first frame it is found below the surface, and at five hundred metres a
+  // second that can be eight metres under — launching the column from there
+  // would start it half-drowned.
+  function seaAt(x, z) {
+    return lastSea.height
+      + lastSea.slopeX * (x - lastSea.originX)
+      + lastSea.slopeZ * (z - lastSea.originZ);
+  }
+
+  function shellSplash(point, speed = 300) {
+    if (!splash.mesh.visible) return; // the fx panel's spray switch
+    const v = Math.min(Math.max(speed / 380, 0.4), 1.5);
+    _splashAt.set(point.x, seaAt(point.x, point.z), point.z);
+
+    // Contact. A flat, fast, very wide sheet of atomised water — the white star
+    // at the base that is gone before the column is up.
+    splash.burst(_splashAt, _splashUp, SPLASH.sheet[0] + v * SPLASH.sheet[1], 90, {
+      spread: 2.6, size: 0.9, life: 0.9,
+    });
+
+    // The crown, as a ring of separate jets rather than one cone. Each gets its
+    // own speed, which is what stops it closing into a neat funnel — a real
+    // crown is torn, with some sides thrown much further than others.
+    const rim = SPLASH.rim[0] + v * SPLASH.rim[1];
+    for (let k = 0; k < SPLASH.sectors; k++) {
+      const th = (k / SPLASH.sectors) * Math.PI * 2 + Math.random() * 0.3;
+      const cx = Math.cos(th);
+      const cz = Math.sin(th);
+      _crownAt.set(_splashAt.x + cx * rim, _splashAt.y, _splashAt.z + cz * rim);
+      _crownDir.set(cx * 0.55, 1, cz * 0.55).normalize(); // ~61° off the water
+      const sp = (SPLASH.crown[0] + v * SPLASH.crown[1]) * (0.75 + Math.random() * 0.5);
+      splash.burst(_crownAt, _crownDir, sp, 18, {
+        spread: 0.55, size: 1.15, life: 7.0, drag: SPLASH.crownDrag,
+      });
+    }
+
+    splashQueue.push({ t: SPLASH.columnAt, stage: 0, x: _splashAt.x, z: _splashAt.z, v });
+    splashQueue.push({ t: SPLASH.surgeAt, stage: 1, x: _splashAt.x, z: _splashAt.z, v });
+  }
+
+  // A stage of a splash whose time has come. Re-reads the surface height rather
+  // than caching it, because half a second is long enough for the wave under it
+  // to have moved.
+  function splashStage(q) {
+    _splashAt.set(q.x, seaAt(q.x, q.z), q.z);
+    const v = q.v;
+    if (q.stage === 0) {
+      // The stem: tight, so it stands as a column and not a spray.
+      splash.burst(_splashAt, _splashUp, SPLASH.stem[0] + v * SPLASH.stem[1], 260, {
+        spread: 0.11, size: 1.9, life: SPLASH.columnLife,
+        flare: 0.035, drag: SPLASH.columnDrag,
+      });
+      // The head, launched a shade harder so it tops the stem, and flared so it
+      // opens out up there. Coarser droplets too — the top of a column breaks
+      // into lumps, not mist.
+      splash.burst(_splashAt, _splashUp, SPLASH.cap[0] + v * SPLASH.cap[1], 200, {
+        spread: 0.19, size: 2.6, life: SPLASH.columnLife,
+        flare: SPLASH.capFlare, drag: SPLASH.columnDrag,
+      });
+      return;
+    }
+    // The crown falling back and running out across the water: low, slow, and
+    // long-lived, which is what leaves a splash sitting on the sea afterwards
+    // instead of switching off.
+    splash.burst(_splashAt, _splashUp, SPLASH.surge[0] + v * SPLASH.surge[1], 110, {
+      spread: 3.4, size: 1.0, life: 3.0,
+    });
+  }
+
+  function stepSplashes(dt) {
+    for (let i = splashQueue.length - 1; i >= 0; i--) {
+      const q = splashQueue[i];
+      q.t -= dt;
+      if (q.t > 0) continue;
+      splashQueue.splice(i, 1);
+      if (splash.mesh.visible) splashStage(q);
+    }
+  }
+
   const _rootQi = new Quaternion();
 
   // Fire one gun of one mount: the blast at the muzzle, the recoil, and where
@@ -719,11 +912,41 @@ export function createBattleship({
   // module's business — see gunnery.js — but everything that happens at the gun
   // is, and it is the same call for a main turret, a casemate or an AA mount.
   const _gunDir = new Vector3();
-  function fireGun(mount, gun) {
+  // `opts` is passed straight through to the blast, which is where a gun's
+  // recoil stroke and how long it takes to run out again are decided. The main
+  // battery wants the defaults; an automatic wants a short stroke and to be back
+  // in battery before the next round leaves it. See muzzleBlast.js.
+  function fireGun(mount, gun, opts = null) {
     if (mount.destroyed) return null;
-    const muzzle = blast.fire(gun, { barrelR: mount.barrelR });
+    const muzzle = blast.fire(gun, { barrelR: mount.barrelR, ...(opts || {}) });
+    if (opts && opts.eject) ejectCase(gun, opts.eject);
     gun.barrel.getWorldDirection(_gunDir);
     return { muzzle, dir: _gunDir.clone(), bore: boreOf(mount.barrelR) };
+  }
+
+  // The empty case out of the breech, in the hull's own frame.
+  //
+  // Both the point and the throw are worked out by transforming *two* points and
+  // subtracting, rather than by composing the mount's yaw and the gun's
+  // elevation into a quaternion by hand. It is the same answer and it cannot be
+  // got wrong: whatever chain of parents the gun happens to hang off, the
+  // difference of two of its points in her frame is the direction in her frame.
+  const _caseP = new Vector3();
+  const _caseQ = new Vector3();
+  function ejectCase(gun, { side = 1, floor = 0, speed = 3.4, z = -0.62 } = {}) {
+    gun.pivot.updateWorldMatrix(true, false);
+    const bx = gun.barrel.position.x;
+    root.worldToLocal(gun.pivot.localToWorld(_caseP.set(bx, 0, z)));
+    root.worldToLocal(gun.pivot.localToWorld(
+      _caseQ.set(bx + side * speed, 2.5, z - 1.1),
+    ));
+    _caseQ.sub(_caseP);
+    // a little scatter, or nine a second come out along one line and read as a
+    // conveyor belt rather than as a gun throwing them
+    _caseQ.x += (Math.random() - 0.5) * 1.2;
+    _caseQ.y += (Math.random() - 0.5) * 0.9;
+    _caseQ.z += (Math.random() - 0.5) * 1.2;
+    cases.eject(_caseP, _caseQ, floor);
   }
 
   function strike({
@@ -1268,7 +1491,10 @@ export function createBattleship({
       heel: heelDeg,
     });
     shards.update(dt, sea.height);
+    cases.update(dt);
     field.update(dt);
+    lastSea = sea;
+    stepSplashes(dt);
     splash.update(dt, sea, _w);
   }
 
@@ -1301,6 +1527,7 @@ export function createBattleship({
     flooding,
     wreck,
     shards,
+    cases,
     colliders,
     burst,
     interior,
@@ -1314,6 +1541,9 @@ export function createBattleship({
     ladders: bridgeUnit ? bridgeUnit.ladders : [],
     // Every damaging event goes through this. See the note where it is defined.
     strike,
+    // A shell into the sea. Shared, so the sim page and the destruction rig
+    // cannot drift apart on what a fall of shot looks like.
+    shellSplash,
     state,
     settings,
     update,
@@ -1328,6 +1558,7 @@ export function createBattleship({
       // wreck group before they are bolted back where they came from
       fittings.repair();
       shards.clear();
+      cases.clear();
       blast.clear();
       colliders.clearStumps();
       for (const mesh of floodWater.byCompartment.values()) mesh.visible = false;

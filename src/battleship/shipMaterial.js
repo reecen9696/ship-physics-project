@@ -4,6 +4,7 @@ import { uniform, uniformArray } from '../scene/uniforms.js';
 import { createBoatMaterial } from '../boat/boatMaterial.js';
 import { createClearGlass } from './glazing.js';
 import { createLampVolume } from './lampVolume.js';
+import { createHandLights } from '../scene/torch.js';
 import { PAINT, PLATING } from './hull.js';
 
 // One material for the whole ship.
@@ -34,11 +35,16 @@ export const MAX_COMPONENTS = 64;
 // per window band, one over each turret door and two inside each turret, which
 // is the right granularity anyway: what a run of seven portholes throws on the
 // deck is one soft patch, not seven.
-export const MAX_LAMPS = 32;
+export const MAX_LAMPS = 40;
 
-// And how many separate rooms have lamps shut inside them. Four turrets today;
-// the spare two are so that adding a lit compartment does not mean coming here.
-export const MAX_LAMP_ROOMS = 6;
+// And how many separate rooms have lamps shut inside them.
+//
+// Seven today: the four turrets, the wheelhouse, and the conning trunk in two
+// halves. Growing this list is nearly free in a way that growing the one above is
+// not — a room costs one box test per fragment and the lamps inside it cost
+// nothing at all unless you are standing in it, which is the whole reason the
+// lights in a compartment go in here rather than out in the weather.
+export const MAX_LAMP_ROOMS = 10;
 
 // How many guns can be lighting her at once.
 //
@@ -131,6 +137,13 @@ export function createShipMaterials({
     col: uniformArray(lampCol, 'vec3'),
     roomHalf: uniformArray(roomHalf, 'vec3'),
   };
+
+  // And the one light on this ship that is not bolted to her: a torch clamped
+  // under a rifle's handguard, carried by whoever is walking her deck. It is the
+  // same idea as the two rigs either side of it — a position and a colour in her
+  // own frame, evaluated per fragment — with an axis and a cone on top, which is
+  // what a torch has and a lamp does not. See scene/torch.js.
+  const torch = createHandLights();
 
   // The guns, as lights. Same shape as a lamp — position and 1/reach in a vec4,
   // colour times level in a vec3 — so the shader can treat one exactly like the
@@ -251,6 +264,8 @@ export function createShipMaterials({
     lamps,
     // and the guns, which are the same idea for a tenth of a second at a time
     flashes,
+    // and the torch, which is the same idea again and walks about
+    torch,
   };
 
   // She is a riveted ship, and every plated part of her says so: strakes about
@@ -361,6 +376,10 @@ export function createShipMaterials({
   return {
     body, deck, glass, clearGlass, slotOf, setDamage, handleFor, damageValues, slots, setLamps,
     setFlashes,
+    // The rig itself rather than a setter: whoever is carrying the torch calls
+    // `torch.set(...)` with the lamp in her frame, and the figure materials —
+    // which are not built here — need the same object to read from.
+    torch,
     lampVolume: volume,
   };
 }
@@ -409,6 +428,25 @@ export function paint(geometry, {
   // And dull white, for the lights over the turret doors. Two bits of colour
   // now — warm, red, white — in the space above the four the level uses.
   lampWhite = false,
+  // 1 on a surface that is *inside* a lit room, and it changes exactly one
+  // thing: what her lamps do to it.
+  //
+  // The lamp rig adds its spill flat — see the block at the foot of
+  // boatMaterial.js — rather than multiplying it by what it is falling on. On
+  // her outside that is right and cheap: the spill is a wash over paint that the
+  // sky is already lighting, so nobody can tell that the warm patch on a grey
+  // bulkhead is not tinted by the grey. Inside a room at night it is the *only*
+  // light there is, and a light that ignores what it lands on paints the whole
+  // compartment one flat colour — the deck, the deckhead, the brass and the
+  // teak all come out the same yellow, which is what the wheelhouse looked like.
+  // So a surface marked this way takes its lamplight through its own colour.
+  //
+  // It rides in `paintMask` rather than in an attribute of its own, and that is
+  // not tidiness: eight vertex buffers is the WebGPU limit, this geometry already
+  // uses all eight, and a ninth does not fail at the draw call with something
+  // legible — it fails as an invalid render pipeline and the ship disappears. One
+  // bit, in the space above the two the lamp colours use.
+  roomLit = 0,
 }) {
   const n = geometry.getAttribute('position').count;
   if (!keepColor) {
@@ -425,7 +463,8 @@ export function paint(geometry, {
   const plated = plate === null ? (TURNED.test(geometry.type) ? 0 : 1) : plate;
   const lampQ = Math.round(Math.min(Math.max(lamp, 0), 1) * 15);
   geometry.setAttribute('paintMask', new Attr(
-    new Float32Array(n).fill(paintMask + plated * 2 + lampQ * 4 + (lampRed ? 64 : 0) + (lampWhite ? 128 : 0)), 1,
+    new Float32Array(n).fill(paintMask + plated * 2 + lampQ * 4
+      + (lampRed ? 64 : 0) + (lampWhite ? 128 : 0) + (roomLit ? 256 : 0)), 1,
   ));
   // 1 on the inward-facing liner meshes: the same program shades them, but as
   // unpainted framed steel in a dark space rather than as her side.

@@ -26,13 +26,17 @@ import { createHullDamage } from './boat/hullDamage.js';
 import { hullQuery } from './boat/hullShape.js';
 import { createBattleship } from './battleship/Battleship.js';
 import { createColliders } from './battleship/colliders.js';
-import { createGunnery, aimAt, SHELL } from './battleship/gunnery.js';
+import { createGunnery, aimAt, SHELL, AA_ROUND } from './battleship/gunnery.js';
 import { createHitMap } from './battleship/hitmap.js';
-import { SHIP_CONFIG, TURRETS } from './battleship/spec.js';
+import { SHIP_CONFIG, TURRETS, AA_MOUNTS, STERN_AA } from './battleship/spec.js';
 import { createCameraCollision } from './scene/cameraCollision.js';
 import { createFirstPerson } from './player/firstPerson.js';
+import { loadPlayerModels } from './player/models.js';
+import { createFigureMaterial } from './player/figureMaterial.js';
+import { createSoundBank } from './util/sound.js';
 import { PLAYER } from './player/spec.js';
 import { LAYING } from './player/turretStation.js';
+import { AA_LAYING } from './player/aaStation.js';
 import { createGUI } from './gui.js';
 import { createHUD } from './util/hud.js';
 import { fx, onFx } from './util/fxToggles.js';
@@ -371,6 +375,11 @@ async function main() {
     buildMesh: () => battleship.group,
   });
   deckFollow = ship.position; // where she actually is, each frame
+  // The camera is in the scene, which it was not and did not need to be while
+  // nothing was parented to it. The first-person rifle is: a view model is drawn
+  // in the camera's own frame, and a child of a camera that is not in the graph
+  // is never traversed and never drawn.
+  scene.add(camera);
   scene.add(ship.group);
   scene.add(battleship.fx.mesh);
   // Anything that has come off her — guardrail, fittings — and the water it
@@ -401,8 +410,6 @@ async function main() {
   const RAM_TO_SHIP = 9; // hit points per megajoule, against 400 per compartment
   const RAM_TO_LAUNCH = 22; // hit points per megajoule, against 100 for the hull
   const _rammed = new Vector3(0, 1, 0);
-  const _v3 = new Vector3();
-  const _qInv = new Quaternion();
   const collisions = createHullCollision();
   collisions.add(ship, {
     hull: battleship.hull,
@@ -487,7 +494,10 @@ async function main() {
   const under = (o, root) => { for (let n = o; n; n = n.parent) if (n === root) return true; return false; };
 
   function onShellHit({ point, object, shell }) {
-    const t = SHELL;
+    // Which projectile arrived. Two guns on this ship now put things in the air
+    // and they are not remotely the same event: a tonne of armour-piercing shell
+    // and a kilogramme of high explosive off the stern mounting.
+    const t = shell.proj || SHELL;
     // There are two hulls in the water and either can be hit. The launch has one
     // number and a hole in her; the battleship has a component graph.
     if (under(object, boat.group)) {
@@ -520,17 +530,22 @@ async function main() {
     });
   }
 
+  // A round of the stern mounting's reaching the end of its fuze and destroying
+  // itself. Nothing is hit and nothing is damaged: what it leaves is the puff,
+  // and a sky full of those is the whole picture of anti-aircraft fire.
+  function onShellBurst({ point }) {
+    battleship.burst.play('FLAK', point, null, 1);
+  }
+
   function onShellMiss({ point, speed }) {
-    if (!battleship.splash.mesh.visible) return;
-    battleship.splash.burst(point, _up, Math.min(6 + speed * 0.03, 16), 120, {
-      spread: 1.4, size: 0.7, life: 2.2,
-    });
+    battleship.shellSplash(point, speed);
   }
 
   // Fired from the eye, down the middle of the screen. The drop is taken out
   // over the range to whatever is under the crosshair, so a shell aimed at the
   // funnel from the forecastle lands on the funnel rather than a couple of
   // metres under it.
+  const _recoil = new Vector3();
   const _muzzle = new Vector3();
   const _aim = new Vector3();
   const _to = new Vector3();
@@ -561,7 +576,6 @@ async function main() {
   // where it is pointing.
   const _muz = new Vector3();
   const _gun = new Vector3();
-  const _fwd = new Vector3();
   const _spin = new Quaternion();
   const _axis = new Vector3();
 
@@ -581,8 +595,6 @@ async function main() {
 
   function fireSalvo(station) {
     ship.group.updateMatrixWorld(true);
-    const q = ship.group.quaternion;
-    let abeam = 0;
     for (const g of station.mount.guns) {
       // The gun going off: the flash at the muzzle, the smoke, the recoil, and
       // the light all of that throws back on her. It hands back where the shell
@@ -591,6 +603,19 @@ async function main() {
       if (!shot) continue;
       _muz.copy(shot.muzzle);
       _gun.copy(shot.dir);
+      // She feels it, and she feels it *where the gun is*. The shove is the
+      // round's momentum plus its propellant gas — see SHELL.momentum — straight
+      // back down the bore, landed on the hull at the muzzle. Everything that
+      // makes one gun's recoil different from another's then falls out of the
+      // geometry rather than being written down: B turret is four metres higher
+      // than A and heels her harder for it, a gun laid at thirty degrees puts
+      // most of its shove down through her instead of across her, and firing
+      // fore-and-aft rolls her hardly at all.
+      //
+      // Before the dispersion below, deliberately. The spread is where the
+      // *shell* went; the gun pushed back down its own bore either way.
+      _recoil.copy(shot.dir).multiplyScalar(-SHELL.momentum);
+      ship.impulseAt(_recoil, shot.muzzle);
       // Dispersion. Two guns in one gunhouse are cross-coupled through the
       // structure and never land in the same place; a shared aim point with no
       // spread reads as one gun fired twice.
@@ -604,16 +629,77 @@ async function main() {
         // already in it, which across the line of fire is metres at any range.
         inherit: ship.velocity,
       });
-      abeam += _v3.copy(_gun).applyQuaternion(_qInv.copy(q).invert()).x;
     }
-    // She feels it. Only as a roll impulse on the hull — the linear momentum of
-    // two shells against 42,000 tonnes is four centimetres a second — but that
-    // impulse reaches every man standing on her deck through the inertial layer
-    // without anything having to tell them, which is the two-space split paying
-    // for itself again.
-    _fwd.set(0, 0, 1).applyQuaternion(q);
-    ship.angVel.addScaledVector(_fwd, abeam * LAYING.recoilRoll);
-    ship.velocity.addScaledVector(_gun, -LAYING.recoilSurge);
+  }
+
+  // --- and her stern mounting, a round at a time -------------------------------
+  //
+  // The same gunnery again, and the third thing it has had to carry: not a salvo
+  // out of a gunhouse but one round out of one barrel, called eight or nine times
+  // a second for as long as the trigger is held. What makes it a different weapon
+  // rather than a fast turret is entirely in the round — see AA_ROUND in
+  // ballistics.js — and in the dispersion, which is wide on purpose. An automatic
+  // is not aimed at an aeroplane, it is aimed at the piece of sky the aeroplane is
+  // going to be in, and a gun that put every round through the same hole would be
+  // useless at that.
+  let aaRound = 0; // which round of the burst this is, for the smoke
+  function fireAARound(station, gun) {
+    ship.group.updateMatrixWorld(true);
+    const A = station.mount.automatic;
+    aaRound += 1;
+    // Which side of the cradle this barrel is on. It decides which way the empty
+    // case is thrown and which way the mounting is shoved, and it is read off the
+    // barrel itself rather than passed in — the gun knows where it is.
+    const side = Math.sign(gun.barrel.position.x) || 1;
+    const shot = battleship.fireGun(station.mount, gun, {
+      recoil: A.recoilScale,
+      // The recuperator runs the gun out again before the next round leaves it,
+      // which is what an automatic *is*; at the main battery's two and a half
+      // seconds the barrels would walk back into the cradle and stay there.
+      runIn: A.recoilIn,
+      runOut: A.recoilOut,
+      // and the flash is over before the next one starts, which is what makes
+      // four barrels read as four barrels taking turns
+      life: A.flashLife,
+      lightLife: A.lightLife,
+      // and the soft half of it cut down — see the note on `discScale` in
+      // spec.js. Standing eight metres from the muzzles, the blast disc at a
+      // naval rifle's proportions is a red veil across the whole quarterdeck.
+      discScale: A.discScale,
+      ballScale: A.ballScale,
+      // A wisp per round and the full cloud every sixth, so a long burst leaves
+      // something drifting downwind without every round contributing a lungful.
+      // See the note on `smokePuff` in spec.js.
+      smokeScale: aaRound % A.smokePuff === 0 ? 1.1 : A.smokeScale,
+      // and the empty, out of the breech and onto the tub floor
+      eject: { side, floor: A.caseFloor, speed: A.caseSpeed },
+    });
+    if (!shot) return;
+    // The mounting answers. Up on the elevation spring every round, and across
+    // on the training one in whichever direction this barrel sits — so the four
+    // of them firing in turn walk the couple from one side to the other and the
+    // whole machine waggles rather than simply nodding. See SHUDDER in mounts.js.
+    station.mount.shove(A.shudderRise, side * A.shudderSwing);
+    _muz.copy(shot.muzzle);
+    _gun.copy(shot.dir);
+    _axis.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    _spin.setFromAxisAngle(
+      _axis,
+      MathUtils.degToRad(A.spread) * (Math.random() - 0.5) * 2,
+    );
+    _gun.applyQuaternion(_spin).normalize();
+    gunnery.fire(_muz, _gun, {
+      owner: ship.group,
+      clearOf: insideShip,
+      inherit: ship.velocity,
+      proj: AA_ROUND,
+    });
+    // What she feels, which is almost nothing — a round of this weighs less than
+    // a bag of cement and she is 42,000 tonnes. But it is *continuous*, and a
+    // deck that hums while the after gun is firing is worth the two lines. Same
+    // door as the main battery, so the mounting's height and train do the work.
+    _recoil.copy(shot.dir).multiplyScalar(-AA_ROUND.momentum);
+    ship.impulseAt(_recoil, shot.muzzle);
   }
 
   // --- and a person, on her deck ----------------------------------------------
@@ -632,6 +718,96 @@ async function main() {
   // funnel that has been shot away and a length of mast lying across the deck
   // are all the same for the player as for anything else, because there is only
   // one answer to where the ship is.
+  // --- the man, his rifle, and the noise it makes --------------------------------
+  //
+  // Three authored assets and the two things built out of them, loaded here
+  // rather than inside the first-person code for one reason: every one of them
+  // can fail — a file that is not there, a loader that throws, a rig that comes
+  // back under different names — and a game that stops because a texture 404'd
+  // is a worse game than one with a capsule on the deck. `loadPlayerModels`
+  // never rejects; it returns nulls and says why in the console, and everything
+  // downstream of it treats a null as an ordinary answer.
+  //
+  // Awaited, and it is worth being clear about what that costs: about four
+  // hundred kilobytes off the local disk, on a page that has already compiled a
+  // WebGPU FFT and built a battleship out of primitives.
+  const models = await loadPlayerModels();
+
+  // One program for everything in this scene that is not the ship, the sea or
+  // the sky: the man and the weapon in his hands. It reads the same sun, the
+  // same sky and the same water her plating does, plus her lamps, her guns'
+  // flashes and the torch — see player/figureMaterial.js for why it cannot
+  // simply be her own material.
+  const figureMaterial = createFigureMaterial({
+    shading,
+    sunShadow: deckShadow,
+    lamps: battleship.materials.lamps ?? null,
+    flashes: battleship.materials.flashes ?? null,
+    torch: battleship.materials.torch,
+  });
+
+  // Sound. See util/sound.js: it is fetched and decoded now and does not make a
+  // noise until the player has done something, which a browser insists on.
+  const sounds = createSoundBank({
+    shot: '/audio/gun/shot.mp3',
+    reload: '/audio/gun/reload.mp3',
+    charge: '/audio/gun/charge.mp3',
+    bolt: '/audio/gun/bolt.mp3',
+    // Three recordings of a sea, not four: the pack ships Waves4 as a
+    // byte-identical copy of Waves1. Matched to each other in level on the way
+    // in — see the note in util/sound.js about why a crossfade between beds of
+    // different loudness is worse than no crossfade at all.
+    sea1: '/audio/sea/waves1.mp3',
+    sea2: '/audio/sea/waves2.mp3',
+    sea3: '/audio/sea/waves3.mp3',
+  });
+  sounds.load();
+
+  // The sea, under everything, always. Two chains crossfading between three
+  // twelve-second recordings — see `ambience` in util/sound.js for why that is
+  // not just a looping buffer.
+  // `gain` is the one knob for how loud the sea is overall — the recordings are
+  // matched to -28 LUFS on the way in, so this is the only thing above them.
+  const seaBed = sounds.ambience(['sea1', 'sea2', 'sea3'], { gain: 1.5, fade: 3 });
+
+  // How loud it is from wherever the eye happens to be. Three things move it,
+  // and all three are things you can see out of the window:
+  //
+  //   - how big a sea is running, which is the wind;
+  //   - how far above it you are, which only really bites in fly mode — at deck
+  //     height it is worth a couple of per cent, and it should be;
+  //   - whether there is a ship between you and it. In a gunhouse or at the
+  //     wheel you are inside a steel box, and the sea goes a long way off.
+  const SEA_AUDIO = {
+    calm: 0.20, // level in a flat calm...
+    gale: 0.90, // ...and at the top of the wind slider
+    wind: [2, 22], // m/s the two above correspond to
+    height: 130, // m above the sea at which it is down to half
+    indoors: 0.30, // what is left of it inside her
+    duck: 2.2, // 1/s the indoor change moves at — a hatch closing, not a fader
+  };
+  let seaIndoor = 1;
+  function seaLevel(dt) {
+    const w = MathUtils.clamp(
+      (params.local.windSpeed - SEA_AUDIO.wind[0]) / (SEA_AUDIO.wind[1] - SEA_AUDIO.wind[0]), 0, 1,
+    );
+    const h = Math.max(0, camera.position.y - shipSea.height);
+    const shut = firstPerson.active && (firstPerson.inside || firstPerson.conning);
+    const want = shut ? SEA_AUDIO.indoors : 1;
+    seaIndoor += (want - seaIndoor) * Math.min(1, SEA_AUDIO.duck * dt);
+    return (SEA_AUDIO.calm + (SEA_AUDIO.gale - SEA_AUDIO.calm) * w)
+      * seaIndoor
+      / (1 + (h / SEA_AUDIO.height) ** 2);
+  }
+
+  // A browser will not start an AudioContext until the user has done something.
+  // Going aboard used to be that something, which meant the sea — which plays
+  // from the sea view as well — stayed silent until you took a gun. Any gesture
+  // at all will do, so the first one is taken.
+  for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
+    addEventListener(ev, () => sounds.unlock(), { once: true, passive: true });
+  }
+
   const firstPerson = createFirstPerson({
     camera,
     controls,
@@ -645,11 +821,15 @@ async function main() {
     mounts: battleship.mounts,
     alive: (id) => battleship.damage.alive(id),
     onFire: () => fireFromEye(),
-    // The four main-battery turrets, each of which is a room you can walk into
+    // The three main-battery turrets, each of which is a room you can walk into
     // and a gun you can lay. See player/turretStation.js.
     turrets: TURRETS,
     damage: battleship.damage,
     onSalvo: fireSalvo,
+    // The stern mounting: an automatic with a seat on it rather than a room, and
+    // a trigger that is held rather than pressed. See player/aaStation.js.
+    sternAA: STERN_AA.id,
+    onRound: fireAARound,
     shellFor: () => SHELL,
     // And her wheelhouse: the pagoda's second level is a room with the wheel in it
     // and clear glass all the way round, reached by the ladder trunk up her
@@ -660,6 +840,19 @@ async function main() {
     // On the forecastle, forward of A turret, looking aft down the length of
     // her. The height is found by dropping onto whatever is under the mark.
     spawn: { position: new Vector3(0, 20, 66), heading: Math.PI },
+    // The man and the rifle. All five may be null and the mode still works —
+    // see the note where they are loaded, and the parameter block in
+    // firstPerson.js.
+    figure: models.soldier,
+    weapon: models.rifle,
+    figureMaterial,
+    lights: battleship.materials.torch,
+    sounds,
+    shading,
+    // What a round does where it lands, out of the ship's own fire-and-smoke
+    // system rather than a second particle system for small arms.
+    smoke: battleship.fx,
+    shipGroup: ship.group,
   });
 
   // The battleship is the ship you are here to drive; the launch is kept in the
@@ -790,9 +983,15 @@ async function main() {
       } else if (k === 'z') firstPerson.cycleMag();
       else if (k === 'g' && !firstPerson.laying && !firstPerson.conning) {
         firstPerson.player.state.fly = !firstPerson.player.state.fly;
-      } else if (k === 'r' && !firstPerson.laying && !firstPerson.conning) {
+      } else if (k === 'p' && !firstPerson.laying && !firstPerson.conning) {
+        // The spawn mark, which used to be R. R is the magazine now, and of the
+        // two a man on foot presses one of them a hundred times a session and
+        // the other when he has walked into the sea.
         firstPerson.player.respawn();
       }
+      // R, L and X are the rifle's — the magazine, the torch and the selector —
+      // and they are answered in firstPerson.js, which is the only place that
+      // knows whether the rifle is in his hands or a turret's handwheels are.
       return;
     }
     if (k === 'c') followBoat = !followBoat;
@@ -852,6 +1051,12 @@ async function main() {
     ocean.evolve(elapsed, dt * params.timeScale); // foam dissipation tracks time scale
     shading.time.value = elapsed;
 
+    // The sea, which is the one thing that is making a noise whatever else is
+    // happening. `step` schedules the next clip against the audio clock, so it
+    // does not care how regularly it gets called.
+    seaBed.level(seaLevel(dt));
+    seaBed.step();
+
     // The boat runs on real time, not the wave clock — so `time scale = 0`
     // freezes the sea into a solid surface you can still drive over, which is
     // the most direct way to check the buoyancy against a known shape.
@@ -908,6 +1113,7 @@ async function main() {
       seaHeight: shipSea.height,
       onHit: onShellHit,
       onMiss: onShellMiss,
+      onBurst: onShellBurst,
       // A shell is in the air for seconds at a time and the air is moving.
       wind: trueWind,
       camera,
@@ -963,7 +1169,25 @@ async function main() {
 
     emaWall = emaWall * 0.9 + dt * 1000 * 0.1;
     hudAccum += dt;
-    if (hudAccum >= 0.25 && firstPerson.laying) {
+    if (hudAccum >= 0.25 && firstPerson.laying && firstPerson.laying.kind === 'aa') {
+      hudAccum = 0;
+      // At the stern mounting the corner says the two things the ring sight
+      // cannot: what the machine is doing, and what the cut-out cam is refusing
+      // to let it do. The second is the one that would otherwise look like a
+      // bug — a gun that will not come down when you push the mouse forward.
+      const g = firstPerson.laying;
+      const r = g.readout();
+      const cam = r.floor > STERN_AA.elevMin + 0.05;
+      hud.set(
+        `${(1000 / emaWall).toFixed(0)} fps\n`
+        + `${g.id} · trained ${g.mount.yaw.toFixed(0)}° (asked ${g.lay.demandYaw.toFixed(0)}°) · `
+        + `elevation ${g.mount.elev.toFixed(0)}°${cam ? ` (cut-out floor ${r.floor.toFixed(0)}°)` : ''}\n`
+        + `${r.rounds}/${r.clip} rounds${r.reload > 0 ? ` · refilling ${r.reload.toFixed(1)}s` : ''} · `
+        + `barrels ${(r.heat * 100).toFixed(0)}%${r.ceased ? ' — CEASED FIRE' : ''} · `
+        + `${gunnery.count} in the air · ${ship.heel.toFixed(0)}° of heel\n`
+        + 'MOUSE = lay · HOLD CLICK = fire · E or ESC = leave the gun',
+      );
+    } else if (hudAccum >= 0.25 && firstPerson.laying) {
       hudAccum = 0;
       // At the gun the sight carries its own instruments, so the corner is left
       // to what the sight cannot show you: what the mount is actually doing.
@@ -1012,15 +1236,26 @@ async function main() {
         `heel ${ship.heel.toFixed(0)}° · ${ship.knots.toFixed(1)} kn · ` +
         `hull ${(s.hullOmega.length() * 180 / Math.PI).toFixed(1)}°/s\n` +
         `${st.grounded ? `${p.speed.toFixed(1)} m/s` : 'falling'} · ` +
+        `${st.crouch > 0.05 ? `crouched${st.pinned ? ' (no room to stand)' : ''} · ` : ''}` +
         `loaded ${SHELL.key} (${SHELL.name})${gunnery.count ? ` · ${gunnery.count} in the air` : ''}` +
         `${st.fly ? ' · FLYING' : ''}${st.overboard ? ` · overboard ${st.overboard}x` : ''}\n` +
+        // The rifle, when there is one. The count and the selector are on the
+        // reticle where the eye already is; what belongs up here is the state of
+        // the *asset*, because a capsule with no gun and a man with one look
+        // exactly like a bug and a feature respectively.
+        `${firstPerson.rifle
+          ? `M16 · ${firstPerson.rifle.rounds}/${firstPerson.rifle.capacity} · `
+            + `${firstPerson.rifle.mode}${firstPerson.rifle.torch ? ' · TORCH' : ''}`
+            + `${firstPerson.modelled ? '' : ' · (no figure — model did not load)'}\n`
+          : 'no rifle — the model did not load\n'}` +
         `${firstPerson.inside ? `inside ${firstPerson.inside.id} · trained ${firstPerson.inside.mount.yaw.toFixed(0)}°` : ''}` +
         `${firstPerson.near
           ? `  [ E or CLICK — take the ${firstPerson.near.kind === 'helm' ? 'wheel' : 'gun'} ]`
           : ''}` +
         `${st.climbing ? '  [ W — up the ladder, S — down ]' : ''}\n` +
-        'WASD = walk · SHIFT = run · SPACE = jump · mouse = look · CLICK = shoot her · ' +
-        `R = spawn mark · G = fly · H = the wheel · N = ${night ? 'day' : 'night'} · V or ESC = back to the sea`,
+        'WASD = walk · SHIFT = run · SPACE = jump · CTRL = crouch · ' +
+        'CLICK = fire · RIGHT-CLICK = sights · R = reload · X = auto/semi · L = torch\n' +
+        `P = spawn mark · G = fly · H = the wheel · N = ${night ? 'day' : 'night'} · V or ESC = back to the sea`,
       );
     } else if (hudAccum >= 0.25) {
       hudAccum = 0;
@@ -1038,7 +1273,8 @@ async function main() {
         : `throttle ${(v.input.throttle * 100).toFixed(0)}%`;
       const cap = battleship.damage.capability;
       const shipLine = isShip
-        ? `guns ${cap.mainBattery}/4 main · ${cap.aa}/6 AA · helm ${(cap.helm * 100).toFixed(0)}% · ` +
+        ? `guns ${cap.mainBattery}/${TURRETS.length} main · ${cap.aa}/${AA_MOUNTS.length + 1} AA · `
+        + `helm ${(cap.helm * 100).toFixed(0)}% · ` +
           `power ${(cap.propulsion * 100).toFixed(0)}% · flooding ${(battleship.state.flood * 100).toFixed(0)}%` +
           `${battleship.state.burning > 0.05 ? ` · ON FIRE (${battleship.state.burning.toFixed(1)})` : ''}` +
           `${battleship.state.sinking ? ' · SINKING' : ''}\n`

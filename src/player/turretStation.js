@@ -1,4 +1,4 @@
-import { Matrix4, Quaternion, Vector3 } from 'three/webgpu';
+import { Euler, Matrix4, Quaternion, Vector3 } from 'three/webgpu';
 import { createMountSpace } from './mountSpace.js';
 import {
   HOUSE, createHouseColliders, insideDoorVolumes, entryVolumes, landing, chamberStation,
@@ -6,6 +6,9 @@ import {
 import { TURRET_SPEC } from '../battleship/spec.js';
 import { deckY, zOf } from '../battleship/hull.js';
 import { rangeFor } from '../battleship/ballistics.js';
+import {
+  DEG, wrap180, clamp, worldToMount, mountToWorld, slew,
+} from './laying.js';
 
 // A turret you can go inside and lay.
 //
@@ -24,10 +27,6 @@ import { rangeFor } from '../battleship/ballistics.js';
 // therefore a matter of leading a target and waiting, which is what laying a gun
 // is.
 
-const DEG = Math.PI / 180;
-const wrap180 = (a) => ((((a + 180) % 360) + 360) % 360) - 180;
-const clamp = (x, a, b) => Math.min(Math.max(x, a), b);
-
 export const LAYING = {
   // How hard the training and elevating engines can push. The rates themselves
   // are TURRET_SPEC's; these are how long it takes to get to them, which is what
@@ -39,18 +38,27 @@ export const LAYING = {
   // far you are zoomed in — which is the only way a x36 sight is usable at all.
   sensitivity: 0.16, // deg per pixel
 
-  // How far the demand may run ahead of the guns.
+  // --- why the sight is not tied to the guns ---------------------------------
   //
-  // This is the number that decides whether laying a turret feels like laying a
-  // turret. Without it the mouse sets an angle anywhere on the horizon and the
-  // gunhouse then grinds off after it for ten seconds, which is not a control —
-  // it is an order you cannot take back. Clamped to a few degrees of lead, the
-  // mouse stops being a pointer and becomes a handwheel: push it and the demand
-  // pegs at the limit and the mount runs at its full rate; hold it there and it
-  // keeps running; let go and the mount closes the last few degrees and stops.
-  // The pip in the sight is then a *rate* indicator, which is what a follow-the-
-  // pointer dial on a real mount is.
-  lead: { train: 7, elev: 3.5 }, // degrees
+  // There used to be a `lead` here: a few degrees past which the demand was not
+  // allowed to run ahead of the mount, on the argument that it turned the mouse
+  // from a pointer into a handwheel. It did — and it also meant the *sight* was
+  // on a seven-degree leash, because the sight looks along the demand. Move the
+  // mouse quickly and the cross stopped dead at the end of the leash and crawled
+  // along at the mount's ten degrees a second, so the whole field of view moved
+  // like the turret rather than like your hand. That is the thing that made this
+  // feel bad, and no amount of tuning the leash fixes it: any leash at all ties
+  // the picture to the machinery.
+  //
+  // So there is no leash. The sight is a free line you lay with the mouse at
+  // whatever speed you move it, bounded only by where the mount could physically
+  // point; the guns then chase it at the rate the engines can hold. That is both
+  // the better control and the more honest one — it is what a layer does, and
+  // the lag he is fighting is the gun's, not his own hand's.
+  //
+  // What is lost is the handwheel's rate cue, and the pip gives it back better:
+  // it is now the gun's true offset from the line you are on, so a long way off
+  // is a long way off, and it walking in is the mount catching up.
 
   // How much of the ship's motion the gear takes out for you.
   //
@@ -77,19 +85,44 @@ export const LAYING = {
   magLabels: ['x1', 'x12', 'x36'],
   reload: 6.0, // seconds. A real 16-inch turret is thirty and nobody would play it.
   spread: 0.13, // degrees of dispersion between the two barrels
-  // How hard a full salvo shoves her. Small — she is 42,000 tonnes — but it goes
-  // in as a roll impulse on the hull, which means everybody standing on her deck
-  // feels the broadside through the inertial layer without anything having to
-  // tell them. That is section 8 of the design note paying for itself.
-  recoilRoll: 0.010, // rad/s of roll per gun fired abeam
-  recoilSurge: 0.05, // m/s
+  // How hard a salvo shoves her is not a number here any more. It is the round's
+  // momentum and its propellant gas landed on the hull at the muzzle, through
+  // Boat.impulseAt — see fireSalvo in main.js. The two constants this replaced
+  // were dialled by eye and rolled her about five times too hard.
+
+  // --- what the layer feels ---------------------------------------------------
+  //
+  // The guns coming back is drawn on the guns (muzzleBlast.js), and from every
+  // position on the ship except one you can watch it happen. The exception is
+  // the one the player is standing in: his eye is in a hood on the gunhouse roof
+  // a couple of metres behind the trunnions, looking along the barrels, so the
+  // whole of that metre and a bit of travel is foreshortened down the view axis
+  // into almost nothing. From the sight, the most violent moving part on the
+  // ship reads as a flicker.
+  //
+  // What he would actually get is the mounting throwing his head. Two sixteen-
+  // inch guns going off inside a gunhouse he is bolted to is not a subtle event,
+  // and it is the cue that says the gun fired rather than that a light came on.
+  // So the eye is kicked and rings down over about half a second.
+  //
+  // The *line* is not touched. This is a gyro sight: it holds the bearing it was
+  // given and the gun cannot argue with it — which is also the only playable
+  // choice, since knocking the aim off every salvo would make laying impossible.
+  // The picture shakes; the aim does not.
+  shock: {
+    pitch: 5.2, // degrees of kick at the eye
+    yaw: 1.4, // and a little across, because the two guns are not symmetrical
+    heave: 0.28, // m the eye is thrown back along the line of fire
+    freq: 8.5, // Hz of the ringing
+    decay: 6.5, // per second
+  },
 };
 
 const _v = new Vector3();
 const _m = new Matrix4();
-const _d = new Vector3();
-const UP = new Vector3(0, 1, 0);
-const _qi = new Quaternion();
+const _kick = new Vector3();
+const _qk = new Quaternion();
+const _eu = new Euler();
 
 export function createTurretStation({
   turret, mount, shipSpace, damage,
@@ -149,9 +182,13 @@ export function createTurretStation({
   // roll her and the ship-frame demand moves without anybody touching the mouse,
   // and the gear goes after it.
   const lay = {
-    demandBearing: 0, // deg, world, 0 = along +z
-    demandPitch: 0, // deg, off the horizon
-    demandYaw: mount.yaw, // the same thing in the ship's frame, for the pip
+    // Where the layer is looking. The mouse writes these directly, at whatever
+    // speed he moves it, and nothing else touches them except the arc limits.
+    sightBearing: 0, // deg, world, 0 = along +z
+    sightPitch: 0, // deg, off the horizon
+    // The same line in the mount's own frame, which is what the guns are asked
+    // for. Not an independent quantity — it *is* the sight, converted.
+    demandYaw: mount.yaw,
     demandElev: 0,
     trainRate: 0,
     elevRate: 0,
@@ -159,78 +196,59 @@ export function createTurretStation({
     held: false,
   };
 
-  // world (bearing, pitch) -> the mount's own (yaw, elev), against her attitude
-  function worldToMount(bearing, pitch, out) {
-    const b = bearing * DEG;
-    const p = pitch * DEG;
-    _d.set(Math.sin(b) * Math.cos(p), Math.sin(p), Math.cos(b) * Math.cos(p));
-    _qi.copy(shipSpace.worldQuaternion).invert();
-    _d.applyQuaternion(_qi);
-    // +yaw is to starboard, which is -x — the same convention mounts.js applies
-    out.yaw = Math.atan2(-_d.x, _d.z) / DEG;
-    out.elev = Math.asin(clamp(_d.y, -1, 1)) / DEG;
-    return out;
-  }
-
-  // and back again, so a demand the arc or the lead had to clamp does not keep
-  // straining against its limit for ever
-  function mountToWorld(yaw, elev, out) {
-    _d.set(0, Math.sin(elev * DEG), Math.cos(elev * DEG));
-    _d.applyAxisAngle(UP, -yaw * DEG);
-    _d.applyQuaternion(shipSpace.worldQuaternion);
-    out.bearing = Math.atan2(_d.x, _d.z) / DEG;
-    out.pitch = Math.asin(clamp(_d.y, -1, 1)) / DEG;
-    return out;
-  }
-
   const _want = { yaw: 0, elev: 0 };
   const _back = { bearing: 0, pitch: 0 };
 
-  // Trapezoidal approach: run at the rate the engine can hold, but never faster
-  // than you could still stop in the angle that is left. That is what stops a
-  // heavy mount hunting round its demand, and it falls out of one square root.
-  function slew(now, demand, rate, rateMax, accel, dt, wrap) {
-    const err = wrap ? wrap180(demand - now) : demand - now;
-    if (Math.abs(err) < LAYING.deadband && Math.abs(rate) < 0.05) return [now, 0];
-    const stop = Math.sign(err) * Math.sqrt(2 * accel * Math.abs(err));
-    const want = clamp(stop, -rateMax, rateMax);
-    const next = rate + clamp(want - rate, -accel * dt, accel * dt);
-    let pos = now + next * dt;
-    // do not step through the demand
-    if ((err > 0 && pos > demand && !wrap) || (err < 0 && pos < demand && !wrap)) pos = demand;
-    return [pos, next];
+  // The gun going off, as the man at the sight has it. `t` runs from the instant
+  // of firing; `mag` scales with how many barrels went at once.
+  const shock = { t: 1e3, mag: 0 };
+  function jolt(strength = 1) {
+    shock.t = 0;
+    shock.mag = Math.max(shock.mag, strength);
   }
 
   function step(dt) {
     if (lay.reload > 0) lay.reload = Math.max(lay.reload - dt, 0);
+    // Ahead of the early return: the mounting goes on ringing whether or not he
+    // still has hold of the gear.
+    if (shock.mag > 0) {
+      shock.t += dt;
+      if (shock.t > 1.2) shock.mag = 0;
+    }
     if (!lay.held || mount.destroyed) return;
 
-    // Where the world-frame demand lands on the mount right now, given how she
-    // is lying. Blended against the raw ship-frame demand by `stabilise`, so the
-    // gear takes out most of the sea and leaves a little of it.
-    worldToMount(lay.demandBearing, lay.demandPitch, _want);
+    // Where the sight line lands on the mount right now, given how she is
+    // lying. Blended by `stabilise`, so the gear takes out most of the sea and
+    // can be made to leave a little of it.
+    worldToMount(shipSpace, lay.sightBearing, lay.sightPitch, _want);
     const k = LAYING.stabilise;
     lay.demandYaw += wrap180(_want.yaw - lay.demandYaw) * k;
     lay.demandElev += (_want.elev - lay.demandElev) * k;
 
-    // Hold the demand inside the arc and the elevation limits...
+    // The only thing that bounds the sight is where the mount could point: the
+    // training arc and the elevation limits. Push past either and the cross
+    // stops there — the layer is looking through a hood on the gunhouse, and
+    // there is nowhere for it to look that the gunhouse cannot go.
+    const yawFree = lay.demandYaw;
+    const elevFree = lay.demandElev;
     lay.demandYaw = mount.arcCenter + clamp(
       wrap180(lay.demandYaw - mount.arcCenter), -mount.arc, mount.arc,
     );
     lay.demandElev = clamp(lay.demandElev, mount.elevMin, mount.elevMax);
-    // ...and then inside a few degrees of the guns, which is what turns the
-    // mouse into a handwheel rather than a pointer. See LAYING.lead.
-    lay.demandYaw = mount.yaw + clamp(
-      wrap180(lay.demandYaw - mount.yaw), -LAYING.lead.train, LAYING.lead.train,
-    );
-    lay.demandElev = mount.elev + clamp(
-      lay.demandElev - mount.elev, -LAYING.lead.elev, LAYING.lead.elev,
-    );
+    // If either bit, put the clamped line back into world angles so the sight
+    // does not keep straining against a limit it cannot pass — otherwise the
+    // moment she rolls the other way the cross jumps by everything the mouse
+    // pushed into the stop while it was there.
+    if (lay.demandYaw !== yawFree || lay.demandElev !== elevFree) {
+      mountToWorld(shipSpace, lay.demandYaw, lay.demandElev, _back);
+      lay.sightBearing = _back.bearing;
+      lay.sightPitch = _back.pitch;
+    }
 
     const [y, ry] = slew(mount.yaw, lay.demandYaw, lay.trainRate,
-      TURRET_SPEC.traverseRate, LAYING.trainAccel, dt, true);
+      TURRET_SPEC.traverseRate, LAYING.trainAccel, dt, true, LAYING.deadband);
     const [e, re] = slew(mount.elev, lay.demandElev, lay.elevRate,
-      TURRET_SPEC.elevateRate, LAYING.elevAccel, dt, false);
+      TURRET_SPEC.elevateRate, LAYING.elevAccel, dt, false, LAYING.deadband);
     lay.trainRate = ry;
     lay.elevRate = re;
     mount.yaw = y;
@@ -240,22 +258,15 @@ export function createTurretStation({
     mount.targetYaw = y;
     mount.targetElev = e;
     mount.apply();
-
-    // Put the clamped demand back into world angles. Without this a demand that
-    // ran into the end of the arc keeps pushing at it for ever, and the moment
-    // she rolls the other way the sight jumps.
-    mountToWorld(lay.demandYaw, lay.demandElev, _back);
-    lay.demandBearing = _back.bearing;
-    lay.demandPitch = _back.pitch;
   }
 
   // Called when the gear is taken: start from wherever the guns are pointing, in
   // world angles, or the first thing stabilisation does is chase a bearing
   // nobody asked for.
   function sync() {
-    mountToWorld(mount.yaw, mount.elev, _back);
-    lay.demandBearing = _back.bearing;
-    lay.demandPitch = _back.pitch;
+    mountToWorld(shipSpace, mount.yaw, mount.elev, _back);
+    lay.sightBearing = _back.bearing;
+    lay.sightPitch = _back.pitch;
     lay.demandYaw = mount.yaw;
     lay.demandElev = mount.elev;
     lay.trainRate = 0;
@@ -294,29 +305,58 @@ export function createTurretStation({
     space.toWorld(_v.copy(HOUSE.sight), _eye);
     // the line she is laid on, in world angles, and world up so the horizon is
     // level whatever the ship is doing
-    const b = lay.demandBearing * DEG;
-    const p = lay.demandPitch * DEG;
+    const b = lay.sightBearing * DEG;
+    const p = lay.sightPitch * DEG;
     _dir.set(Math.sin(b) * Math.cos(p), Math.sin(p), Math.cos(b) * Math.cos(p));
     _up.set(0, 1, 0);
     camera.position.copy(_eye);
     _tgt.copy(_eye).add(_dir);
     _m.lookAt(_eye, _tgt, _up);
     camera.quaternion.setFromRotationMatrix(_m);
+
+    // ...and then the mounting throws his head. Applied to the camera *after*
+    // the line is laid, and to nothing else: `lay` is untouched, so when it has
+    // rung down the sight is on exactly the bearing it was on when the gun went.
+    // Cosine rather than sine so the first frame is the full kick — a shock that
+    // starts at nothing and builds is a wobble, not a bang.
+    if (shock.mag > 0) {
+      const S = LAYING.shock;
+      const e = Math.exp(-S.decay * shock.t) * shock.mag;
+      const ring = Math.cos(2 * Math.PI * S.freq * shock.t) * e;
+      _kick.set(S.pitch * DEG * ring, S.yaw * DEG * ring * 0.6, 0);
+      _qk.setFromEuler(_eu.set(_kick.x, _kick.y, 0, 'XYZ'));
+      camera.quaternion.multiply(_qk);
+      // and shoved bodily back down the line of fire, which is the half of it
+      // you feel in your neck rather than see
+      camera.position.addScaledVector(_dir, -S.heave * e);
+    }
     return { eye: _eye, dir: _dir };
   }
 
   // How far the *guns* are off the sight line, as a fraction of the vertical
   // field. The cross is where the sight is looking; the pip is where the shells
   // will actually go. When they sit on top of each other, fire.
+  //
+  // With no leash on the sight the guns can be most of an arc behind it, which
+  // is a pip several screens off the glass and therefore no pip at all. So it is
+  // held at the rim when it runs out of field and flagged `far`, and the sight
+  // draws that as a bearing to the guns rather than as their position. You still
+  // get the one thing that matters — which way they are coming from, and that
+  // they are still coming.
+  const PIP_RIM = 0.45; // fractions of the vertical field, just inside the glass
+
   function demandOffset(fovDeg) {
-    return {
-      dx: -wrap180(lay.demandYaw - mount.yaw) / fovDeg,
-      dy: -(lay.demandElev - mount.elev) / fovDeg,
-    };
+    const dx = -wrap180(lay.demandYaw - mount.yaw) / fovDeg;
+    const dy = -(lay.demandElev - mount.elev) / fovDeg;
+    const r = Math.hypot(dx, dy);
+    if (r <= PIP_RIM) return { dx, dy, far: false };
+    const k = PIP_RIM / r;
+    return { dx: dx * k, dy: dy * k, far: true };
   }
 
   return {
     id: turret.id,
+    kind: 'turret',
     turret,
     mount,
     space,
@@ -324,11 +364,20 @@ export function createTurretStation({
     step,
     sync,
     sight,
+    jolt,
     demandOffset,
     rangeAt,
     flightTime,
     room,
     onBandstand,
+    // Whether the body stands in the ship's own frame while working this gear.
+    // True for a working chamber, which does not train, and false for a gunhouse
+    // room, which does — see `crossDoors` in firstPerson.js.
+    inShipFrame: onBandstand,
+    // The sight's fields of view and what to call them. Carried on the station
+    // rather than read off LAYING, because the other gun on this ship has an
+    // open ring sight with no magnification at all.
+    optics: { fov: LAYING.fov, labels: LAYING.magLabels },
     doorsIn: room.doorsIn,
     doorsOut: room.doorsOut,
     landing: room.landing,

@@ -61,7 +61,13 @@ export const sprayConfig = {
   // and isolated droplets can only ever read as isolated droplets — cohesion
   // comes from local density.
   life: 0.5,
-  drag: 2.8, // atomised water sheds speed fast
+  // Atomised water sheds speed fast. This is the figure for *mist* — a hull's
+  // spray is millimetre droplets and they fall at about 3.5 m/s — and any burst
+  // that is throwing something heavier than mist says so with its own `drag`.
+  // Getting that wrong is very visible: a shell column launched at this figure
+  // stands up in a second and then takes nine to come down, which reads as
+  // falling snow rather than as several hundred tonnes of water.
+  drag: 2.8,
   windCarry: 0.12,
 };
 
@@ -82,6 +88,9 @@ export function createHullSpray({ shading, count = 30000 }) {
   const vel = new Float32Array(count * 3);
   const life = new Float32Array(count);
   const maxLife = new Float32Array(count);
+  // Per droplet, because one pool carries both the hull's mist and the lumps of
+  // water a shell throws, and they do not fall at remotely the same speed.
+  const drag = new Float32Array(count);
   let cursor = 0;
   let alive = 0;
   // Only the slots that changed get uploaded — see dirtyRanges.js. The pool is
@@ -152,14 +161,32 @@ export function createHullSpray({ shading, count = 30000 }) {
   mesh.renderOrder = 20; // after the sea, which is itself drawn after the hull
 
   const _d = new Vector3();
+  const _ax = new Vector3();
+  const _a1 = new Vector3();
+  const _a2 = new Vector3();
 
   // Launch `n` droplets from `origin` along `dir`, at `speed` (m/s), spread over
   // a cone of `spread` radians, and carried by `carry` (the hull's own velocity —
   // spray leaves the boat already moving with it).
+  //
+  // `flare` throws droplets sideways off the axis, as a fraction of their own
+  // launch speed, weighted hard toward the fast ones. That weighting is the
+  // whole point of it: within a burst, the fastest droplets are the ones that
+  // end up at the top, so flaring them and not the others makes a rising column
+  // spread at its head while its stem stays narrow — which is a mushroom. A
+  // plain wide cone cannot do this, because there the angle and the speed are
+  // drawn independently and you get a fan.
   function burst(origin, dir, speed, n, {
     spread = 0.5, carry = null, size = 0.16, life: lifeSpan = 1.1,
-    along = null, alongScale = 0,
+    along = null, alongScale = 0, flare = 0, drag: dragK = 0,
   } = {}) {
+    if (flare) {
+      // Any two axes across `dir` will do — the azimuth is random anyway.
+      _ax.copy(dir).normalize();
+      _a1.set(Math.abs(_ax.x) > 0.9 ? 0 : 1, 0, Math.abs(_ax.x) > 0.9 ? 1 : 0);
+      _a1.crossVectors(_ax, _a1).normalize();
+      _a2.crossVectors(_ax, _a1).normalize();
+    }
     for (let k = 0; k < n; k++) {
       const i = cursor;
       cursor = (cursor + 1) % count;
@@ -170,7 +197,16 @@ export function createHullSpray({ shading, count = 30000 }) {
       _d.x += (Math.random() - 0.5) * spread;
       _d.y += (Math.random() - 0.5) * spread * 0.6;
       _d.z += (Math.random() - 0.5) * spread;
-      _d.normalize().multiplyScalar(speed * (0.55 + Math.random() * 0.9));
+      const g = 0.55 + Math.random() * 0.9;
+      _d.normalize().multiplyScalar(speed * g);
+      if (flare) {
+        // Cubed, so the slowest droplets barely move outward at all and the
+        // spread is confined to the head of the column.
+        const vr = speed * flare * ((g / 1.45) ** 3);
+        const th = Math.random() * Math.PI * 2;
+        _d.addScaledVector(_a1, Math.cos(th) * vr);
+        _d.addScaledVector(_a2, Math.sin(th) * vr);
+      }
       if (carry) _d.add(carry);
 
       const j = i * 3;
@@ -186,6 +222,9 @@ export function createHullSpray({ shading, count = 30000 }) {
       const r = Math.random();
       posSize.array[p + 3] = size * (0.35 + r * r * sprayConfig.sizeTail);
 
+      // 0 means "whatever sprayConfig says at the time", so the hull's own spray
+      // still follows the slider live. Anything else is this burst's own water.
+      drag[i] = dragK;
       maxLife[i] = lifeSpan * (0.7 + Math.random() * 0.7);
       life[i] = maxLife[i];
       fade.array[i * 2 + 1] = Math.random();
@@ -203,7 +242,7 @@ export function createHullSpray({ shading, count = 30000 }) {
       dirty.flush(posSize, fade);
       return;
     }
-    const drag = 1 / (1 + sprayConfig.drag * dt);
+    const dflt = sprayConfig.drag;
     const wc = sprayConfig.windCarry;
     alive = 0;
     for (let i = 0; i < count; i++) {
@@ -215,10 +254,11 @@ export function createHullSpray({ shading, count = 30000 }) {
 
       const j = i * 3;
       const p = i * 4;
+      const d = 1 / (1 + (drag[i] || dflt) * dt);
       vel[j + 1] -= 9.81 * dt;
-      vel[j] = (vel[j] + wind.x * wc * dt) * drag;
-      vel[j + 1] *= drag;
-      vel[j + 2] = (vel[j + 2] + wind.z * wc * dt) * drag;
+      vel[j] = (vel[j] + wind.x * wc * dt) * d;
+      vel[j + 1] *= d;
+      vel[j + 2] = (vel[j + 2] + wind.z * wc * dt) * d;
 
       posSize.array[p] += vel[j] * dt;
       posSize.array[p + 1] += vel[j + 1] * dt;

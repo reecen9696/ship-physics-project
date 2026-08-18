@@ -182,7 +182,7 @@ function barrelBoreGeometry(length, r) {
 }
 
 // shell and bore in one buffer: two colours, one draw call, one mesh to elevate
-function makeBarrel(length, r, mk, material) {
+export function makeBarrel(length, r, mk, material) {
   return new Mesh(merge([
     mk(barrelShellGeometry(length, r), STEEL_DARK, 0.4),
     mk(barrelBoreGeometry(length, r), BORE_BLACK, 0.95),
@@ -190,10 +190,55 @@ function makeBarrel(length, r, mk, material) {
 }
 
 // shared traverse/elevation behaviour
-function makeMount({
+//
+// `elevFloor(yaw)` is the one thing here that is not the same for every mount.
+// Most guns on this ship have a single depression stop and it is a number; a
+// mount that trains all the way round has a *cut-out cam* instead — a floor that
+// varies with bearing, cut so the barrels cannot come down onto anything of her
+// own. Passing it as a function rather than as a table keeps this file ignorant
+// of what is standing on her deck, which is the whole point: see sternAA.js.
+// --- what a gun going off does to the mounting it is bolted to ----------------
+//
+// The barrel coming back is drawn on the barrel (muzzleBlast.js) and it is only
+// half of what you see. The other half is that the *mount* answers: thirty
+// tonnes of it on a roller path takes the reaction of every round through its
+// trunnions and its training rack, and what that looks like is a nod and a
+// waggle that never quite settle while the gun is firing.
+//
+// A decaying sine per round is the obvious way to write it and it is the wrong
+// one, because rounds arrive faster than any such curve rings down and the
+// overlaps are what the effect *is*. So it is a spring: the mounting has a rest
+// position, a stiffness and some damping, and firing a round gives it a shove.
+// Fire once and it nods and settles; fire nine a second and it never gets back
+// to rest, which is exactly the judder an automatic has and is impossible to
+// fake with a per-round animation.
+//
+// `freq` is the mounting's own frequency in Hz, `damp` its damping ratio.
+const SHUDDER = {
+  freq: 7.0,
+  damp: 0.42,
+  // Hard stops, so a runaway or a very long burst cannot walk the guns off the
+  // target. At these figures a sustained burst holds about half a degree of
+  // muzzle rise, which is a real number for a mounting this size and small
+  // enough that the layer can hold through it.
+  maxRise: 1.1, // degrees
+  maxSwing: 0.7,
+};
+
+export function makeMount({
   id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevMin, elevMax, damage,
-  barrelR = 0.34,
+  barrelR = 0.34, elevFloor = null,
 }) {
+  // The mounting's displacement from rest, in degrees, and its rate. Two
+  // independent springs: one in elevation (the muzzles climbing) and one in
+  // train (the whole mounting slewing a hair against its rack).
+  const shudder = {
+    rise: 0, riseVel: 0, swing: 0, swingVel: 0,
+  };
+  const W = 2 * Math.PI * SHUDDER.freq;
+  const K = W * W;
+  const C = 2 * SHUDDER.damp * W;
+
   const m = {
     id,
     kind,
@@ -219,20 +264,68 @@ function makeMount({
       m.targetYaw = yaw;
       m.targetElev = elev;
     },
+    // The floor at a given bearing: the depression stop, or the cut-out cam if
+    // this mount has one. Asked by the mount below and by the layer's sight, so
+    // the two cannot disagree about where the gun may point.
+    floorAt(yaw) {
+      return elevFloor ? Math.max(m.elevMin, elevFloor(yaw)) : m.elevMin;
+    },
+    // A round leaving. `rise` is the shove up the elevation spring and `swing`
+    // the shove across the training one, both in degrees per second — a rate,
+    // not a displacement, because what a round delivers is an impulse and what
+    // decides how far the mounting actually moves is how stiff it is.
+    //
+    // Whoever pulls the trigger says how hard, because it is a property of the
+    // round and not of the mounting: see `automatic.shudder` in sternAA.js.
+    shove(rise, swing = 0) {
+      shudder.riseVel += rise;
+      shudder.swingVel += swing;
+    },
+    get shudder() { return shudder; },
     // train and elevate toward the target at the mount's own rates, inside its arc
     update(dt) {
+      m.settle(dt);
       if (m.destroyed) return;
       const relTarget = clamp(wrap180(m.targetYaw - m.arcCenter), -m.arc, m.arc);
       const relNow = wrap180(m.yaw - m.arcCenter);
       const rel = approach(relNow, relTarget, spec.traverseRate * dt);
       m.yaw = m.arcCenter + rel;
-      m.elev = approach(m.elev, clamp(m.targetElev, m.elevMin, m.elevMax), spec.elevateRate * dt);
+      // Against the floor at the bearing she has *arrived* at, not the one she
+      // left: a mount training across the cut-out has to lift as it goes, which
+      // is exactly what the cam does to it on a real mounting.
+      const floor = m.floorAt(m.yaw);
+      m.elev = approach(m.elev, clamp(m.targetElev, floor, m.elevMax), spec.elevateRate * dt);
       m.apply();
+    },
+    // One step of the two springs. Substepped, because a stiff spring integrated
+    // at a long frame is a spring that gains energy — and this one is shoved
+    // nine times a second, so it would find that energy and diverge into a gun
+    // waving about the sky.
+    settle(dt) {
+      let left = Math.min(dt, 0.25);
+      while (left > 1e-6) {
+        const h = Math.min(left, 1 / 240);
+        shudder.riseVel += (-K * shudder.rise - C * shudder.riseVel) * h;
+        shudder.rise += shudder.riseVel * h;
+        shudder.swingVel += (-K * shudder.swing - C * shudder.swingVel) * h;
+        shudder.swing += shudder.swingVel * h;
+        left -= h;
+      }
+      shudder.rise = clamp(shudder.rise, -SHUDDER.maxRise, SHUDDER.maxRise);
+      shudder.swing = clamp(shudder.swing, -SHUDDER.maxSwing, SHUDDER.maxSwing);
     },
     apply() {
       // +yaw is to starboard, which is -x: a rotation about +y turns +z toward +x
-      yawPivot.rotation.y = -m.yaw * DEG;
-      for (const g of guns) g.pivot.rotation.x = -(m.elev + (g.droop || 0)) * DEG;
+      //
+      // The shudder is added here rather than to `yaw` and `elev` themselves,
+      // which is the whole point of it being a separate pair of numbers: where
+      // the gun is *laid* is what the sight, the cut-out cam and the readout all
+      // ask about, and that must not wobble. What wobbles is where the barrels
+      // happen to be pointing this frame — which is also where the shells go,
+      // and so is a real part of the gun's dispersion.
+      yawPivot.rotation.y = -(m.yaw + shudder.swing) * DEG;
+      const e = m.elev + shudder.rise;
+      for (const g of guns) g.pivot.rotation.x = -(e + (g.droop || 0)) * DEG;
     },
     // Killed: paint scorched, guns drooped at random, and no more motion. This
     // is the visual half of a kill; the game decides when to call it.

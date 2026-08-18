@@ -1,5 +1,6 @@
 import { Vector3 } from 'three/webgpu';
-import { SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS } from './spec.js';
+import { SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS, STERN_AA } from './spec.js';
+import { daisTiers } from './sternAA.js';
 import {
   deckAt, keelAt, sideAt, deckY, zOf, INNER_DECKS, PLATING,
 } from './hull.js';
@@ -46,20 +47,34 @@ export function boxHit(p, c, h, n) {
 }
 
 // An upright cylinder, or a raked one: `axis` is a unit vector, `len` the run
-// along it from `base`.
-function cylinderHit(p, base, axis, len, r, n) {
+// along it from `base`. `bore` makes it a tube rather than a rod — nothing inside
+// that radius is material — which is what the air-defence platform is, now that
+// the ladder to the bridge comes up through the middle of it.
+//
+// A hole in a deck has to be a hole to the *floor probe*, not only to the wall
+// solver. The solver ignores horizontal faces, so a body on a ladder passes
+// through a thin slab whether it has a hole in it or not; the probe does not, and
+// a man stepping into the hatch was landing on the platform's own plate a hand's
+// breadth down, standing in the opening with his head out of it — grounded, and
+// therefore unable to start down the ladder at all, because a grounded body only
+// takes a ladder on the way *up*.
+function cylinderHit(p, base, axis, len, r, n, bore = 0) {
   const vx = p.x - base.x; const vy = p.y - base.y; const vz = p.z - base.z;
   const t = vx * axis.x + vy * axis.y + vz * axis.z;
   if (t < 0 || t > len) return 0;
   const rx = vx - axis.x * t; const ry = vy - axis.y * t; const rz = vz - axis.z * t;
   const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
   if (d >= r) return 0;
-  // out sideways, unless it is nearer to the end cap
+  if (bore > 0 && d <= bore) return 0;
+  // out sideways, unless it is nearer to the end cap — and on a tube, sideways
+  // may be inward, toward the bore
   const cap = Math.min(t, len - t);
-  if (cap < r - d) { n.copy(axis).multiplyScalar(t < len - t ? -1 : 1); return cap; }
+  const side = bore > 0 ? Math.min(r - d, d - bore) : r - d;
+  if (cap < side) { n.copy(axis).multiplyScalar(t < len - t ? -1 : 1); return cap; }
   if (d < 1e-4) { n.set(1, 0, 0); return r; }
-  n.set(rx / d, ry / d, rz / d);
-  return r - d;
+  const inward = bore > 0 && d - bore < r - d ? -1 : 1;
+  n.set((rx / d) * inward, (ry / d) * inward, (rz / d) * inward);
+  return side;
 }
 
 export function createColliders({
@@ -96,7 +111,7 @@ export function createColliders({
         sh.needs ? { needs: sh.needs } : {});
     } else {
       cyl(sh.id, new Vector3(...sh.base), new Vector3(...sh.axis), sh.len, sh.r,
-        sh.needs ? { needs: sh.needs } : {});
+        { ...(sh.needs ? { needs: sh.needs } : {}), ...(sh.bore ? { bore: sh.bore } : {}) });
     }
   }
 
@@ -147,6 +162,37 @@ export function createColliders({
       c: new Vector3(0, y0 + TURRET_SPEC.gunhouseH / 2, zOf(t.z)),
       h: new Vector3(TURRET_SPEC.gunhouseW / 2, TURRET_SPEC.gunhouseH / 2, TURRET_SPEC.gunhouseL / 2),
       needs: t.id,
+    });
+  }
+
+  // --- the stern mounting -------------------------------------------------------
+  //
+  // Two kinds of thing, and the distinction is the whole of why this is short.
+  //
+  // The platform is *solid*, to everybody. It used to be a drum tagged
+  // `barbette`/`bandstand` so the player would skip it and get a hand-built room
+  // out of deckAccess instead, because there was a splinter tub standing on it
+  // with a doorway in it. There is no tub any more and so no room: what is here
+  // is three plain steps up to a plain platform, and the cylinders that are drawn
+  // are the cylinders that stop you. One description — `daisTiers` in sternAA.js
+  // — and nothing to keep in step.
+  //
+  // The mounting on top of it trains, so it is a turret-frame box and it goes
+  // when the mount does.
+  {
+    const A = STERN_AA;
+    for (const t of daisTiers()) {
+      cyl(A.id, new Vector3(0, deckY(A.z) + t.y0, zOf(A.z)), new Vector3(0, 1, 0),
+        t.y1 - t.y0, t.r);
+    }
+    const reach = A.trunnionZ + A.barrelLength;
+    shapes.push({
+      kind: 'turret',
+      id: A.id,
+      mountId: A.id,
+      c: new Vector3(0, deckY(A.z) + A.ringH + A.trunnionY - 0.35, zOf(A.z) + reach / 2),
+      h: new Vector3(2.10, 1.30, reach / 2),
+      needs: A.id,
     });
   }
 
@@ -368,7 +414,7 @@ export function createColliders({
         let len = sh.len;
         if (sh.severable && sh.stump !== undefined) len = sh.stump;
         if (len <= 0.05) continue;
-        d = cylinderHit(p, sh.base, sh.axis, len, sh.r, _n);
+        d = cylinderHit(p, sh.base, sh.axis, len, sh.r, _n, sh.bore ?? 0);
       } else {
         // a turret: spin the point back into the gunhouse's own frame
         const m = mounts && mounts.get(sh.mountId);

@@ -1,11 +1,12 @@
 import { Vector3 } from 'three/webgpu';
 import { boxHit } from '../battleship/colliders.js';
-import { SHIP, SUPER, TURRETS, TURRET_SPEC } from '../battleship/spec.js';
+import { SHIP, SUPER, TURRETS, TURRET_SPEC, STERN_AA } from '../battleship/spec.js';
 import {
   HOUSE, chamberSolids, entryVolumes, houseShellSolids,
 } from '../battleship/turretHouse.js';
 import { deckY, zOf } from '../battleship/hull.js';
 import { deckPropSolids } from '../battleship/deckProps.js';
+import { sternAASolids, sternAAFootprint } from '../battleship/sternAA.js';
 import { wheelhouseStoop } from '../battleship/wheelhouse.js';
 import { bridgeDoorways, ladderVolumes, platformTop } from '../battleship/bridgeAccess.js';
 import { PLAYER } from './spec.js';
@@ -170,7 +171,7 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     for (const b of houseShellSolids()) {
       boxes.push({
         id: `${t.id}.house`,
-        turret: t.id,
+        mount: t.id,
         pivotZ: cz,
         c: new Vector3(b.c[0], b.c[1] + py, b.c[2] + cz),
         h: new Vector3(b.h[0], b.h[1], b.h[2]),
@@ -197,7 +198,7 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     const reach = TURRET_SPEC.barrelLength;
     boxes.push({
       id: `${t.id}.guns`,
-      turret: t.id,
+      mount: t.id,
       pivotZ: cz,
       c: new Vector3(0, trunnionY, cz + TURRET_SPEC.trunnionZ + reach / 2),
       h: new Vector3(
@@ -281,6 +282,24 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
     }
   }
 
+  // --- the stern mounting ---------------------------------------------------
+  //
+  // Only the machine, and only the part of it that turns. The platform it stands
+  // on is three plain cylinders in the ship's own colliders and the player gets
+  // them like everything else does — there is no room here to be inside of and
+  // therefore no second, door-shaped description of it to keep in step. Getting
+  // on is three risers of 300 mm skirted round the barbette, which the floor
+  // probe walks up without any of this having to know about it.
+  for (const b of sternAASolids()) {
+    boxes.push({
+      id: b.id,
+      mount: b.mount || null,
+      pivotZ: b.pivotZ,
+      c: new Vector3(b.c[0], b.c[1], b.c[2]),
+      h: new Vector3(b.h[0], b.h[1], b.h[2]),
+    });
+  }
+
   // Everything lying about on the weather deck.
   //
   // These are here rather than in colliders.js for the reason at the head of
@@ -307,6 +326,16 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
   {
     const mouths = [
       ...TURRETS.flatMap((t) => entryVolumes(t, deckY, zOf)),
+      ...(() => {
+        // The stern mounting, steps and all. A crate at the foot of the steps is
+        // a gun you have to jump onto, which is invisible from anywhere except
+        // by trying it — the same trap the turret doorways are subtracted for.
+        const f = sternAAFootprint();
+        return [{
+          c: { x: f.x, y: (f.y0 + f.y1) / 2, z: f.z },
+          h: { x: f.r, y: (f.y1 - f.y0) / 2, z: f.r },
+        }];
+      })(),
       ...bridgeDoorways(),
     ];
     const blocks = (b) => mouths.some((m) => Math.abs(b.c[0] - m.c.x) < b.h[0] + m.h.x + 0.8
@@ -322,7 +351,7 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
   }
 
   for (const b of boxes) {
-    if (b.turret) {
+    if (b.mount) {
       // whatever way she is trained, in plan
       const R = Math.hypot(Math.abs(b.c.z - b.pivotZ) + b.h.z, b.h.x);
       b.min = new Vector3(-R, b.c.y - b.h.y, b.pivotZ - R);
@@ -344,9 +373,9 @@ export function createDeckAccess({ mounts = null, alive = () => true } = {}) {
       if (p.y < b.min.y || p.y > b.max.y) continue;
       if (p.z < b.min.z || p.z > b.max.z) continue;
       let d;
-      if (b.turret) {
-        if (!alive(b.turret)) continue; // shot away: the guns went with it
-        const m = mounts && mounts.get(b.turret);
+      if (b.mount) {
+        if (!alive(b.mount)) continue; // shot away: the guns went with it
+        const m = mounts && mounts.get(b.mount);
         const yaw = m ? m.yawPivot.rotation.y : 0;
         const c = Math.cos(-yaw); const s = Math.sin(-yaw);
         const dx = p.x; const dz = p.z - b.pivotZ;

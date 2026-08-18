@@ -5,7 +5,10 @@ import { createCharacter } from './character.js';
 import { createAvatar } from './avatar.js';
 import { createPlayerInput } from './input.js';
 import { createGunsight } from './gunsight.js';
+import { createReticle } from './reticle.js';
+import { createRifle, RIFLE } from './weapon.js';
 import { createTurretStation, LAYING } from './turretStation.js';
+import { createAAStation, AA_LAYING } from './aaStation.js';
 import { createHelmStation } from './helmStation.js';
 import { HOUSE } from '../battleship/turretHouse.js';
 import { PLAYER } from './spec.js';
@@ -41,6 +44,7 @@ const _world = new Vector3();
 const _v = new Vector3();
 const _euler = new Euler(0, 0, 0, 'YXZ');
 const _q = new Quaternion();
+const _punch = { pitch: 0, yaw: 0 };
 const IDLE = {
   forward: 0, strafe: 0, jump: false, sprint: false, rise: 0,
 };
@@ -54,10 +58,32 @@ const inBox = (p, vol, margin = 0) => Math.abs(p.x - vol.c.x) < vol.h.x + margin
 export function createFirstPerson({
   camera, controls, element, body, colliders, hull, materials, spawn,
   mounts = null, alive = () => true, turrets = [], damage = null,
-  onFire = null, onSalvo = null, shellFor = null,
+  onFire = null, onSalvo = null, onRound = null, shellFor = null,
+  // The stern mounting, if she has one: the id of an all-round automatic in
+  // `mounts` that gets a seat rather than a room. See player/aaStation.js.
+  sternAA = null,
   // The wheelhouse, if she has one: `{ wheelhouse }` off the ship's own bridge.
   // With it, the helm becomes a station you walk up to like a turret's.
   conn = null,
+  // --- the man and what he is carrying -----------------------------------------
+  //
+  // All optional, and all independently so. Every one of these is either an
+  // authored asset fetched over the network or something built out of one, and a
+  // file that did not arrive is not a reason for the deck to be empty: with none
+  // of them this is exactly the game it was — a capsule on the deck and a
+  // crosshair that fires test shells.
+  //
+  // `figure` is the rigged soldier off player/models.js, `weapon` the rifle from
+  // the same place, `figureMaterial` the program both are drawn with, `lights`
+  // the carried-light rig off `materials.torch`, and `sounds` the bank the
+  // report comes out of.
+  figure = null, weapon = null, figureMaterial = null,
+  lights = null, sounds = null, shading = null, smoke = null,
+  // Her hull group. Wanted by the rifle — the tracers hang off it and the lights
+  // it carries are stated in her frame — and by the figure, whose ship-frame
+  // matrix has to be rebuilt every frame because unlike her plating he moves
+  // through it.
+  shipGroup = null,
 }) {
   const shipSpace = createShipSpace({
     id: 'ship',
@@ -82,16 +108,56 @@ export function createFirstPerson({
   });
   const access = createDeckAccess({ mounts, alive });
   const player = createCharacter({ space: shipSpace, extra: access, spawn });
-  const avatar = createAvatar({ materials });
+  // The rifle. Built before the avatar, because the avatar is what puts it in
+  // his hands — see `HOLD` in avatar.js.
+  //
+  // `getSpace` rather than the space itself: a man who walks into a gunhouse is
+  // simulated in the gunhouse's frame from that moment, and the rounds he fires
+  // have to be marched against the gunhouse's colliders in the gunhouse's frame.
+  // Handing the rifle a space would mean remembering to hand it another one at
+  // every door.
+  const rifle = (weapon && figureMaterial && shipGroup)
+    ? createRifle({
+      camera,
+      material: figureMaterial,
+      proto: weapon,
+      root: shipGroup,
+      lights,
+      fx: smoke,
+      shading,
+      sounds,
+      onHit: () => reticle && reticle.struck(),
+      getSpace: () => player.space,
+    })
+    : null;
+  if (rifle) camera.add(rifle.view);
+
+  const avatar = createAvatar({
+    materials,
+    figure,
+    rifle: rifle ? rifle.held : null,
+    shipGroup,
+  });
   body.group.add(avatar.group); // ship-local by construction
 
   // One station per main-battery turret: its own space, its own doors, its own
   // training gear.
+  //
+  // ...and one more that is not a turret at all. The gun on her quarterdeck is
+  // an open mounting with a seat on it: no room, no doors, no gyro sight, a
+  // trigger you hold down. It goes in the same list because everything below
+  // this line — walking up to it, taking the gear, the sight, letting go — is
+  // the same gesture, and the differences are all inside the station itself.
   const stations = mounts
     ? turrets.map((t) => createTurretStation({
       turret: t, mount: mounts.get(t.id), shipSpace, damage,
     }))
     : [];
+  if (mounts && sternAA && mounts.get(sternAA)) {
+    stations.push(createAAStation({
+      mount: mounts.get(sternAA), shipSpace, damage, onRound,
+    }));
+  }
   const stationById = new Map(stations.map((s) => [s.id, s]));
 
   // And one for the wheel. It is in the ship's own frame — the wheelhouse is part
@@ -103,6 +169,11 @@ export function createFirstPerson({
   }) : null;
 
   const sight = createGunsight();
+  // Two instruments, and only ever one of them up. The gunsight is what you see
+  // through a turret's hood; the reticle is what a man walking about with a
+  // rifle has instead, and it is the rifle's own — it opens with the group and
+  // shuts when the sights come up. See reticle.js.
+  const reticle = rifle ? createReticle() : null;
 
   let active = false;
   let conning = null; // the helm, if our hands are on it
@@ -131,16 +202,57 @@ export function createFirstPerson({
     element,
     onExit: () => exit(),
     onFire: () => fire(),
+    // Three keys that belong to the weapon, and they are handled here rather
+    // than with the rest of the keyboard in main.js for one reason: they only
+    // mean anything while the rifle is actually in his hands, and this is the
+    // only file that knows whether it is. R at a turret's gear must not eject a
+    // magazine, and L on the bridge must not light one.
+    onTap: (k) => {
+      if (!rifle || !active || laying || conning) return;
+      if (k === 'r') rifle.reload();
+      else if (k === 'l') rifle.toggleTorch();
+      else if (k === 'x') rifle.cycleMode();
+    },
   });
 
+  // Whether the rifle is in his hands this instant.
+  //
+  // It is not while a turret's training gear is, or the ship's wheel, or while
+  // you are watching from the sea — three states that are otherwise unrelated
+  // and all mean the same thing to a weapon. Slung rather than dropped: the
+  // magazine, the selector and the torch all keep their state, because a man who
+  // lets go of a gun to steer the ship has not put his torch out.
+  function carry(on) {
+    if (!rifle) return;
+    rifle.show(on);
+    // The copy in the deck figure's hands is drawn only when the deck figure is,
+    // which is when nobody is aboard. Standing at a turret's gear is `on === false`
+    // as well, and there the man is hidden — so this is keyed off `active` rather
+    // than off the argument.
+    rifle.showHeld(!active && avatar.modelled);
+    if (reticle) reticle.show(on);
+    if (!on) rifle.settle();
+  }
+
   // --- taking and giving up a gun --------------------------------------------
+
+  // The click that takes hold of an automatic must not also fire it.
+  //
+  // The trigger is a *state* — see input.js — and the button is still down at
+  // the instant the gear arrives in your hands, so without this you climb onto
+  // the mounting and it empties a second and a half of ammunition into the sea
+  // before you have let go of the mouse. Latched on taking the gun and released
+  // the first time the button comes up.
+  let triggerLatch = false;
 
   function takeGun(station) {
     if (!station || !station.alive()) return;
     laying = station;
+    triggerLatch = true;
     mag = 0; // every gun opens at x1
     station.lay.held = true;
     station.sync(); // start from where the guns actually are, in world angles
+    carry(false);
     avatar.group.visible = false;
     sight.show(true);
     applyFov();
@@ -149,8 +261,13 @@ export function createFirstPerson({
   function leaveGun() {
     if (!laying) return;
     laying.lay.held = false;
+    // Let go of the trigger on the way out. A gun left firing because the mouse
+    // happened to be down when you pressed E would go on emptying its racks at
+    // nothing while you walked away from it.
+    if (laying.setTrigger) laying.setTrigger(false);
     laying = null;
     sight.show(false);
+    carry(active);
     applyFov();
   }
 
@@ -171,6 +288,7 @@ export function createFirstPerson({
     leaveGun();
     conning = helm;
     helm.hold();
+    carry(false);
     avatar.group.visible = false;
     applyFov();
     return true;
@@ -180,6 +298,7 @@ export function createFirstPerson({
     if (!conning) return;
     conning.release();
     conning = null;
+    carry(active);
     applyFov();
   }
 
@@ -195,19 +314,44 @@ export function createFirstPerson({
     if (!active) return;
     if (conning) return; // both hands on the wheel
     if (laying) {
+      // An automatic is not fired by a click. Its trigger is *held*, and the
+      // button's state is read every frame further down in `update` — so a click
+      // at this gun does nothing here and the gun answers to holding it instead.
+      if (laying.setTrigger) return;
       if (laying.lay.reload > 0 || !laying.alive()) return;
       laying.lay.reload = LAYING.reload;
+      // Both barrels at once, so he gets the whole of it. See LAYING.shock: the
+      // guns coming back is drawn on the guns, but from the sighting hood that
+      // travel is straight down the view axis and reads as nothing — this is
+      // what tells him at the eyepiece that the gun went off.
+      laying.jolt(1);
+      // ...and this is what tells his *eye*. Two sixteen-inch guns go off a
+      // couple of metres in front of the hood; the flash on the muzzles is over
+      // in a third of a second and being blinded by it is not.
+      sight.fire(1);
       if (onSalvo) onSalvo(laying);
       return;
     }
     // On foot: walking up to a set of training gear and pressing the button is
-    // the same click that would otherwise put a shell into her.
+    // the same click that would otherwise fire the rifle. The gear wins — you
+    // are standing at it, which is not a place anybody shoots from.
     if (near) { takeControls(near); return; }
+    // A press fires one round whichever way the selector is set; holding it is
+    // read in `update`, and only answers on automatic. See weapon.js.
+    if (rifle) { rifle.trigger(); return; }
+    // No rifle — the model did not load, or there never was one. The test shell
+    // out of the eye is what this button did before and still does.
     if (onFire) onFire();
   }
 
+  // Whatever optic the gun in your hands actually has. A turret carries a x36
+  // telescope with three powers; the stern mounting carries a hoop of steel with
+  // one. Read off the station rather than off LAYING, or Z at the AA gun zooms a
+  // sight that has no lenses in it.
+  const optics = () => (laying ? laying.optics : LAYING);
+
   function applyFov() {
-    const want = laying ? LAYING.fov[mag] : fov;
+    const want = laying ? optics().fov[mag] : fov;
     if (Math.abs(camera.fov - want) > 0.02) {
       camera.fov = want;
       camera.updateProjectionMatrix();
@@ -216,7 +360,7 @@ export function createFirstPerson({
 
   function cycleMag() {
     if (!laying) return;
-    mag = (mag + 1) % LAYING.fov.length;
+    mag = (mag + 1) % optics().fov.length;
     applyFov();
   }
 
@@ -266,7 +410,7 @@ export function createFirstPerson({
 
     for (const st of stations) {
       // A working chamber is part of the ship, so there is no boundary to cross.
-      if (st.onBandstand || !st.alive()) continue;
+      if (st.inShipFrame || !st.alive()) continue;
       st.space.fromParent(player.position, _cross);
       if (!roomHas(_cross, -0.15)) continue;
       st.space.velocityFromParent(player.position, player.velocity, _crossVel);
@@ -295,7 +439,7 @@ export function createFirstPerson({
       return player.position.distanceTo(inside.station) < inside.reach ? inside : null;
     }
     for (const st of stations) {
-      if (!st.onBandstand || !st.alive()) continue;
+      if (!st.inShipFrame || !st.alive()) continue;
       if (player.position.distanceTo(st.station) < st.reach) return st;
     }
     // and the wheel, which is in the ship's frame like a working chamber is
@@ -326,6 +470,11 @@ export function createFirstPerson({
     camera.updateProjectionMatrix();
     active = true;
     input.enable();
+    // A browser will not start an AudioContext until the user has done something,
+    // and going aboard is a keypress or a button — a real gesture, and always
+    // before the first round. See util/sound.js.
+    if (sounds) sounds.unlock();
+    carry(true);
     place();
   }
 
@@ -334,6 +483,10 @@ export function createFirstPerson({
     leaveGun();
     leaveWheel();
     active = false;
+    carry(false);
+    // Mid-burst, and the player has just gone back to watching from a mile away.
+    // The tails are two and a third seconds long and would follow him out there.
+    if (sounds) sounds.silence();
     input.disable();
     controls.enabled = true;
     camera.fov = saved.fov;
@@ -360,7 +513,7 @@ export function createFirstPerson({
     leaveGun();
     leaveWheel();
     avatar.group.parent?.remove(avatar.group);
-    if (st.onBandstand) {
+    if (st.inShipFrame) {
       // its room is part of the ship, so there is no space to be handed into
       inside = null;
       player.rehome(shipSpace, access);
@@ -414,10 +567,15 @@ export function createFirstPerson({
     const want = Math.min(speed / PLAYER.walk, 1.35);
     bobAmount += (want - bobAmount) * Math.min(dt * 9, 1);
 
+    // Wider flat out, narrower with the sights up. The second is not a zoom and
+    // is not pretending to be one: an aperture sight has no lenses in it. It is
+    // what happens to the *picture* when a man stops scanning and starts looking
+    // at one thing, and sixteen degrees of it is about the difference.
     const wantFov = PLAYER.fov
       + PLAYER.sprintFov * Math.min(Math.max(
         (player.speed - PLAYER.walk) / (PLAYER.sprint - PLAYER.walk), 0,
-      ), 1);
+      ), 1)
+      + (rifle ? RIFLE.aimFov * rifle.aiming : 0);
     fov += (wantFov - fov) * Math.min(dt * 6, 1);
     applyFov();
   }
@@ -430,7 +588,10 @@ export function createFirstPerson({
     // Two steps to a stride, so the rise and fall runs at twice the sway.
     const rise = Math.sin(bobPhase * 2) * PLAYER.bob * bobAmount;
     const sway = Math.sin(bobPhase) * PLAYER.bobRoll * bobAmount;
-    _local.set(player.position.x, player.position.y + PLAYER.eye + rise, player.position.z);
+    // `player.eye`, not PLAYER.eye: he can crouch, and the camera has to come
+    // down with the collision capsule or the head goes through whatever he
+    // ducked under. See character.js.
+    _local.set(player.position.x, player.position.y + player.eye + rise, player.position.z);
     space.toWorld(_local, _world);
     camera.position.copy(_world);
     // The view rolls with whatever you are standing in, because that is the frame
@@ -454,25 +615,64 @@ export function createFirstPerson({
     // through this frame's sight, which at x36 is a visible stutter.
     const look = active ? input.consumeLook() : null;
     if (laying && look) {
-      // The mouse moves the *demand*, not the guns; the mount's own gear decides
-      // what to do about it and takes its time. `look` arrives already
+      // The mouse moves the *sight*, not the guns, and it moves it as fast as
+      // the hand does — there is nothing between the two. The guns then go after
+      // the line at the rate the engines can hold, which is what the pip shows. `look` arrives already
       // multiplied by the walking sensitivity, so that is divided back out.
       //
-      // Scaled by the square root of the field, not the field itself: linear
-      // scaling makes a x36 sight so slow you cannot traverse in it at all,
-      // while no scaling makes it uncontrollable. The root splits the
-      // difference — fine laying stays fine, and you can still get the mount
-      // moving.
-      const perPixel = LAYING.sensitivity * Math.sqrt(LAYING.fov[mag] / LAYING.fov[0]);
-      // The demand is a bearing and an elevation in the *world*, so a hand held
-      // still holds the sight still however she rolls. Signs match the walking
-      // camera exactly — mouse right trains to starboard, mouse up elevates —
-      // which they did not before, and a sight that goes down when you push the
-      // mouse up is unusable however good the rest of it is.
-      laying.lay.demandBearing += (look.yaw / PLAYER.sensitivity) * perPixel;
-      laying.lay.demandPitch += (look.pitch / PLAYER.sensitivity) * perPixel;
+      // Scaled by the field itself, so a pixel of mouse is the same fraction of
+      // the picture at every magnification: about a screen per three hundred and
+      // fifty pixels, x1 or x36.
+      //
+      // It used to be scaled by the square root of the field, because linear
+      // scaling made a x36 sight too slow to traverse in — but that was the
+      // leash talking. Traversing meant waiting for the mount, so the sight had
+      // to be over-geared to get anywhere, and the price was that fine laying at
+      // high power was twitchy. With the sight free of the guns you can throw it
+      // across the horizon at any power, so it can afford to be geared honestly,
+      // and a small movement at x36 is now a small movement.
+      const gearing = laying.setTrigger ? AA_LAYING.sensitivity : LAYING.sensitivity;
+      const f = optics().fov;
+      const perPixel = gearing * (f[mag] / f[0]);
+      const dx = (look.yaw / PLAYER.sensitivity) * perPixel;
+      const dy = (look.pitch / PLAYER.sensitivity) * perPixel;
+      // Two guns, two frames the hand is working in, and the station says which.
+      //
+      // A turret's demand is a bearing and an elevation in the *world*, so a hand
+      // held still holds the sight still however she rolls — that is the gyro
+      // sight. The stern mounting has no gyro: its demand is in its own frame, the
+      // hand moves the gun relative to the ship, and the sea moves the picture.
+      // The signs are the same either way and they match the walking camera —
+      // mouse right trains to starboard, mouse up elevates — because a sight that
+      // goes down when you push the mouse up is unusable however good the rest of
+      // it is.
+      if (laying.look) laying.look(dx, dy);
+      else {
+        laying.lay.sightBearing += dx;
+        laying.lay.sightPitch += dy;
+      }
     }
+    // The trigger, as a state rather than as an event: an automatic is held
+    // down. Read every frame and only while the gear is in your hands, so
+    // clicking your way back into the tub does not open fire on the way past.
+    if (!input.firing) triggerLatch = false;
+    if (laying && laying.setTrigger) {
+      laying.setTrigger(active && input.firing && !triggerLatch);
+    }
+    // Ahead of any of the branches below, so the dazzle fades on wall time
+    // rather than only while something happens to be redrawing the sight.
+    sight.step(dt);
     for (const st of stations) st.step(dt);
+    // The automatic going off in the layer's face.
+    //
+    // A turret's salvo gets the full dazzle once every six seconds, because that
+    // is what happens: two sixteen-inch guns and then a long wait. This gun
+    // gives him a fifth of that nine times a second and never lets it clear, so
+    // what he is looking through the whole time he has the trigger down is a
+    // washed-out picture that comes back the moment he stops. That is the honest
+    // reason an open mounting has a flash hider on every barrel, and it is the
+    // one cue that makes a long burst *cost* something to look at.
+    if (laying && laying.lay.firing) sight.fire(0.18);
     for (const st of stations) {
       st.space.syncHull(dt);
       st.space.refresh();
@@ -486,23 +686,47 @@ export function createFirstPerson({
       player.step(dt, IDLE, now);
       avatar.group.visible = true;
       avatar.place(player.position, player.state.heading);
+      poseAvatar(dt);
+      // Not held, but still burning: a torch left on when you go back to watching
+      // her from the sea is still on the end of the rifle in his hands, and the
+      // light it throws has to keep following him about her deck. Everything
+      // inside that is about *aiming* is skipped — see `s.held`.
+      if (rifle) rifle.update(dt, { held: false });
       return;
     }
 
     if (laying) {
       laying.sight(camera);
-      const off = laying.demandOffset(LAYING.fov[mag]);
-      const shell = shellFor ? shellFor() : { key: '—' };
-      sight.set({
-        range: laying.rangeAt(laying.mount.elev),
-        tof: laying.flightTime(laying.mount.elev),
-        turret: laying.id.replace('turret.', ''),
-        shell: shell.key,
-        mag,
-        reload: laying.lay.reload,
-        dx: off.dx,
-        dy: off.dy,
-      });
+      const off = laying.demandOffset(optics().fov[mag]);
+      // Two guns, two instruments. A turret's sight is a range plate and a
+      // shell; an automatic's is a rounds counter and a heat gauge, because
+      // those are the two numbers that decide whether you may pull the trigger.
+      if (laying.setTrigger) {
+        sight.set({
+          mode: 'aa',
+          mount: laying.id.replace('aa.', ''),
+          mag,
+          field: optics().fov[mag],
+          dx: off.dx,
+          dy: off.dy,
+          far: off.far,
+          ...laying.readout(),
+        });
+      } else {
+        const shell = shellFor ? shellFor() : { key: '—' };
+        sight.set({
+          mode: 'turret',
+          range: laying.rangeAt(laying.mount.elev),
+          tof: laying.flightTime(laying.mount.elev),
+          turret: laying.id.replace('turret.', ''),
+          shell: shell.key,
+          mag,
+          reload: laying.lay.reload,
+          dx: off.dx,
+          dy: off.dy,
+          far: off.far,
+        });
+      }
       avatar.group.visible = false;
       return;
     }
@@ -532,13 +756,75 @@ export function createFirstPerson({
       return;
     }
 
-    player.step(dt, input.read(), now);
+    const keys = input.read();
+    player.step(dt, keys, now);
     crossDoors(dt);
     near = findControls();
     feel(dt);
     place();
     avatar.group.visible = false;
     avatar.place(player.position, player.state.heading);
+
+    // The rifle, last: it hangs off the camera and reads the camera's axis for
+    // where the round goes, so it has to run after `place` has put the camera
+    // where it belongs this frame. Running it before is a weapon that answers
+    // last frame's look — the same argument, and the same frame of lag, as the
+    // note about the mouse and the mounts at the top of this function.
+    if (rifle) {
+      rifle.update(dt, {
+        held: true,
+        firing: input.firing,
+        aiming: input.aiming,
+        look,
+        speed: player.speed,
+        sprinting: keys.sprint && player.state.grounded,
+        grounded: player.state.grounded,
+        crouch: player.state.crouch,
+      });
+      // What the recoil has walked the aim to, handed back once and cleared. The
+      // weapon does not move the camera itself — the camera is not its to move,
+      // and a weapon that writes the look directly cannot be overridden by the
+      // hand that is trying to pull it back down.
+      rifle.consumePunch(_punch);
+      player.state.pitch = Math.min(
+        Math.max(player.state.pitch + _punch.pitch, -PLAYER.pitchLimit),
+        PLAYER.pitchLimit,
+      );
+      player.state.heading += _punch.yaw;
+      if (reticle) {
+        reticle.update(dt);
+        reticle.set({
+          rounds: rifle.rounds,
+          capacity: rifle.capacity,
+          mode: rifle.mode,
+          reloading: rifle.reloading,
+          reloadFor: RIFLE.reload,
+          torch: rifle.torch,
+          spread: rifle.spread,
+          fov: camera.fov,
+          aiming: rifle.aiming,
+        });
+      }
+    }
+  }
+
+  // The figure, posed. Split out because it is wanted from two places — the
+  // frame where nobody is aboard and he is standing on the deck being looked at
+  // from the sea, and the frame where he is being walked about — and because
+  // neither of them should have to know the shape of what soldier.js wants.
+  function poseAvatar(dt) {
+    const st = player.state;
+    avatar.pose(dt, {
+      speed: player.speed,
+      grounded: st.grounded,
+      climbing: st.climbing,
+      crouch: st.crouch,
+      height: player.height,
+      pitch: st.pitch,
+      aiming: !!(rifle && rifle.aiming > 0.5),
+      recoil: rifle ? rifle.recoil : 0,
+    });
+    avatar.sync();
   }
 
   return {
@@ -547,7 +833,13 @@ export function createFirstPerson({
     get inside() { return inside; },
     get near() { return near; },
     get conning() { return conning; },
-    get magnification() { return LAYING.magLabels[mag]; },
+    get magnification() { return optics().labels[mag]; },
+    // The rifle, for the read-out. Null when the model did not load, which is
+    // the case the HUD has to be able to say something about.
+    rifle,
+    // Whether the man on the deck is the modelled figure or the capsule that
+    // stands in for one — same reason.
+    get modelled() { return avatar.modelled; },
     enter,
     exit,
     toggle,

@@ -60,13 +60,86 @@ export const SHELL = {
   pen: 26,
   fire: 0.10,
   breach: 1.0,
+  // The propellant, and the reason the gun's shove is bigger than the shell's
+  // own momentum. A 16-inch charge is about a fifth of the shell's weight and it
+  // leaves the muzzle as gas at appreciably more than the shell's speed, so the
+  // gun is pushed by both. The usual allowance is the charge times about 1.3
+  // times muzzle velocity; leaving it out under-reads a battleship's recoil by
+  // very nearly a third, which is not a rounding error.
+  charge: 290, // kg of propellant
+  gasSpeed: 1.3, // ...leaving at this multiple of the muzzle velocity
+
   // How much of the gun's shove she feels, per gun. Kept here rather than in the
   // laying because it is a property of the round: this much mass leaving at this
   // much speed is what the recoil *is*.
-  get momentum() { return this.mass * this.muzzle; },
+  get momentum() {
+    return this.mass * this.muzzle + this.charge * this.gasSpeed * this.muzzle;
+  },
 };
 
-const AREA = Math.PI * (SHELL.caliber / 2) ** 2; // frontal area, m^2
+// --- and the other projectile ------------------------------------------------
+//
+// The stern mounting's round. There is one of these too, for the same reason
+// there is one shell: an automatic is fed from a belt and the layer does not
+// pick what is in it.
+//
+// Everything that makes it behave differently from the 16-inch round is in two
+// numbers — its mass and its calibre — and the difference is enormous. Sectional
+// density, mass over frontal area, is what decides how fast a projectile is
+// eaten by the air: the AP shell has 7,400 kg/m^2 and this has 760, a tenth of
+// it. So it leaves fifty per cent faster and is down to half speed inside four
+// seconds, which is exactly why an automatic gun is a short-range weapon and no
+// amount of muzzle velocity fixes that.
+//
+// The muzzle velocity is a *real* one, unlike the main battery's. The lie in
+// SHELL.muzzle exists to bring a 35 km gun down into a world you can see across;
+// this gun's honest 850 m/s already puts its useful range at two or three
+// thousand metres, which is exactly where the fighting here happens.
+//
+// `fuze` is the round destroying itself in the air, and it is the thing that
+// makes AA fire look like AA fire. A tracer round that missed does not fly on
+// for ever and come down on somebody: it is built to burst at the end of its
+// useful run, and what you see is the sky ahead of the aeroplane filling with
+// black puffs. Without it you get a hosepipe of sparks going off to infinity,
+// which is a firework and not a gun.
+export const AA_ROUND = {
+  key: 'HE-T',
+  name: 'high explosive tracer',
+  caliber: 0.040, // m
+  length: 0.30,
+  mass: 0.96, // kg
+  muzzle: 850, // m/s
+  fuze: 4.4, // s to self-destruct
+  // How long the composition in its base actually burns. Shorter than the fuze
+  // on purpose and true of the real thing: the last second of the run is a dark
+  // round nobody can follow, and then it goes off. That gap is what makes a sky
+  // full of these read as *flak* — puffs appearing out of nothing — rather than
+  // as a firework where every spark ends in a bang you watched arrive.
+  tracerLife: 3.2, // s
+  wound: 'FLAK',
+  damage: 7,
+  pen: 3,
+  fire: 0.03,
+  breach: 0.12,
+  // The trace. A tracer is a lamp on the back of the round burning the whole way
+  // out, and it is far and away the brightest thing about the gun: at any range
+  // past a few hundred metres it is the *only* thing you can see of the round.
+  tracer: [1.0, 0.72, 0.30],
+  // Proportionally more gas than the big gun — a light shell out of a long case
+  // is most of a boot in the shoulder. See SHELL for what this is.
+  charge: 0.31,
+  gasSpeed: 1.4,
+  get momentum() {
+    return this.mass * this.muzzle + this.charge * this.gasSpeed * this.muzzle;
+  },
+};
+
+// Frontal area, m^2 — cached on the projectile the first time anything asks, so
+// the integrator is not doing a squaring and a multiply by pi per substep.
+const areaOf = (proj) => {
+  if (proj._area === undefined) proj._area = Math.PI * (proj.caliber / 2) ** 2;
+  return proj._area;
+};
 
 // --- the air -----------------------------------------------------------------
 //
@@ -108,8 +181,8 @@ function dragCoefficient(mach) {
 // k = rho Cd A / 2m. Everything above feeds this and nothing else uses any of it.
 // `speed` and `y` are the airspeed and the height; the caller supplies the
 // airspeed rather than the ground speed so that wind is simply a different `v`.
-export function dragFactor(speed, y) {
-  return (0.5 * rho(y) * dragCoefficient(speed / soundSpeed(y)) * AREA) / SHELL.mass;
+export function dragFactor(speed, y, proj = SHELL) {
+  return (0.5 * rho(y) * dragCoefficient(speed / soundSpeed(y)) * areaOf(proj)) / proj.mass;
 }
 
 // --- flight ------------------------------------------------------------------
@@ -123,13 +196,13 @@ export function dragFactor(speed, y) {
 // literal both work and the table does not have to allocate.
 const _a = { x: 0, y: 0, z: 0 };
 
-function accel(v, y, wind, out) {
+function accel(v, y, wind, out, proj) {
   // relative to the air, which is what a shell is actually moving through
   const rx = v.x - (wind ? wind.x : 0);
   const ry = v.y - (wind ? wind.y : 0);
   const rz = v.z - (wind ? wind.z : 0);
   const speed = Math.sqrt(rx * rx + ry * ry + rz * rz);
-  const k = dragFactor(speed, y);
+  const k = dragFactor(speed, y, proj);
   out.x = -k * speed * rx;
   out.y = -G - k * speed * ry;
   out.z = -k * speed * rz;
@@ -138,9 +211,12 @@ function accel(v, y, wind, out) {
 
 const _vp = { x: 0, y: 0, z: 0 };
 
-export function flightStep(p, v, dt, wind = null) {
+// `proj` is which projectile is flying: the same integrator carries a tonne of
+// armour-piercing shell and a kilogramme of tracer, and the only thing that
+// changes between them is the drag factor above.
+export function flightStep(p, v, dt, wind = null, proj = SHELL) {
   // Predict with the acceleration where we are...
-  accel(v, p.y, wind, _a);
+  accel(v, p.y, wind, _a, proj);
   const ax = _a.x;
   const ay = _a.y;
   const az = _a.z;
@@ -152,7 +228,7 @@ export function flightStep(p, v, dt, wind = null) {
   // Verlet form is implicit and this predictor-corrector is the honest version
   // of it; one extra evaluation buys an order of accuracy, which over a
   // fifty-second flight is the difference between a firing table and a guess.
-  accel(_vp, p.y + v.y * dt, wind, _a);
+  accel(_vp, p.y + v.y * dt, wind, _a, proj);
   p.x += 0.5 * (v.x + _vp.x) * dt;
   p.y += 0.5 * (v.y + _vp.y) * dt;
   p.z += 0.5 * (v.z + _vp.z) * dt;

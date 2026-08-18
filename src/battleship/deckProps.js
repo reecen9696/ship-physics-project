@@ -5,7 +5,7 @@ import {
 import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
 import {
-  SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS, AA_SPEC, COMPARTMENTS,
+  SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS, AA_SPEC, STERN_AA, COMPARTMENTS,
 } from './spec.js';
 import { deckY, zOf, halfBeamAt, STEEL, STEEL_DARK } from './hull.js';
 import { PLAYER } from '../player/spec.js';
@@ -681,6 +681,12 @@ function houses() {
     const w = t.bandstand ? TURRET_SPEC.barbetteR * 2.5 * 1.12 : TURRET_SPEC.barbetteR * 2;
     const d = t.bandstand ? TURRET_SPEC.barbetteR * 2.5 * 1.26 : TURRET_SPEC.barbetteR * 2;
     add(t.z - d / 2 / L, t.z + d / 2 / L, w / 2);
+  }
+  // and the stern mounting, steps and all — a round thing quoted as a square one,
+  // which the metre-and-a-bit pad round every entry in this list more than covers.
+  {
+    const r = STERN_AA.ringR + STERN_AA.steps * STERN_AA.stepTread;
+    add(STERN_AA.z - r / L, STERN_AA.z + r / L, r);
   }
   return list;
 }

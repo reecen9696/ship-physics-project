@@ -15,7 +15,7 @@ import { createShading, applyTimeOfDay, updateSunDir } from '../scene/shading.js
 import { createBoat } from '../boat/Boat.js';
 import { capitalShipHandling } from '../boat/shipHandling.js';
 import { createBattleship } from '../battleship/Battleship.js';
-import { SHIP_CONFIG, COMPARTMENTS, TURRETS, AA_MOUNTS } from '../battleship/spec.js';
+import { SHIP_CONFIG, COMPARTMENTS, TURRETS, AA_MOUNTS, STERN_AA } from '../battleship/spec.js';
 import { createHUD } from '../util/hud.js';
 import { createGunnery, aimAt, SHELL } from '../battleship/gunnery.js';
 import { createHitMap } from '../battleship/hitmap.js';
@@ -198,11 +198,10 @@ async function main() {
       { title: 'hull compartments', components: COMPARTMENTS },
       { title: 'main battery', components: TURRETS },
       { title: 'superstructure', components: ['bridge', 'funnel', 'mainmast', 'steering', 'screws'].map((id) => ({ id })) },
-      { title: 'anti-aircraft', components: AA_MOUNTS },
+      { title: 'anti-aircraft', components: [STERN_AA, ...AA_MOUNTS] },
     ],
   });
 
-  const _up = new Vector3(0, 1, 0);
   const _dir = new Vector3();
 
   // The rig does not damage the ship itself. It resolves *what* was hit and
@@ -243,9 +242,7 @@ async function main() {
   }
 
   function onMiss({ point, speed }) {
-    battleship.splash.burst(point, _up, Math.min(6 + speed * 0.03, 16), 120, {
-      spread: 1.4, size: 0.7, life: 2.2,
-    });
+    battleship.shellSplash(point, speed);
   }
 
   // --- aiming ----------------------------------------------------------------

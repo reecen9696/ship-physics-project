@@ -3,7 +3,7 @@ import {
   Vector3,
 } from 'three/webgpu';
 import { uniform } from '../scene/uniforms.js';
-import { SHIP, SUPER, TURRETS, TURRET_SPEC } from './spec.js';
+import { SHIP, SUPER, TURRETS, TURRET_SPEC, STERN_AA } from './spec.js';
 import { deckY, zOf } from './hull.js';
 import { deckPropSolids } from './deckProps.js';
 import { WHEEL } from './wheelhouse.js';
@@ -211,6 +211,14 @@ export function lampOccluders() {
     // makes, and for the same reason.
     add(0, deckY(t.z) + t.deckRise + TURRET_SPEC.gunhouseH / 2, zOf(t.z) - 1.0,
       TURRET_SPEC.gunhouseW / 2, TURRET_SPEC.gunhouseH / 2, TURRET_SPEC.gunhouseL / 2);
+  }
+  // The stern mounting's platform. Low, and it carries no lights of its own any
+  // more — what it is here for is to stop the lamps further forward reaching
+  // under it, which is the same job the barbettes do.
+  {
+    const A = STERN_AA;
+    const r = A.ringR + A.steps * A.stepTread;
+    add(0, deckY(A.z) + A.ringH / 2, zOf(A.z), r, A.ringH / 2, r);
   }
   return boxes;
 }
