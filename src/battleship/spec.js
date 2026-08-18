@@ -55,17 +55,28 @@ export const COMPARTMENTS = [
 // B's station and A's, so B has to be raised by that much again just to break
 // even. See `assertSuperfiringClearance` at the foot of this file, which checks
 // the arithmetic against the actual sheer rather than trusting these numbers.
+//
+// Three of them, not four. Y turret — the aftermost — is gone, and what stands
+// on her quarterdeck now is a quadruple heavy AA mounting: see `STERN_AA` below
+// for what that is and why it is there. X keeps its bandstand, because the rise
+// is what gives the after battery any arc at all over the quarterdeck, and it
+// now superfires over nothing.
 export const TURRETS = [
   { id: 'turret.A', z: +0.25, deckRise: 0.9, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: null },
-  { id: 'turret.B', z: +0.15, deckRise: 5.6, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: 'turret.A', bandstand: 4.0 },
-  { id: 'turret.X', z: -0.25, deckRise: 5.4, arcCenter: 180, arc: 150, compartment: 'hull.aft', superfires: 'turret.Y', bandstand: 3.8 },
-  { id: 'turret.Y', z: -0.36, deckRise: 0.9, arcCenter: 180, arc: 150, compartment: 'hull.aft', superfires: null },
+  { id: 'turret.B', z: +0.15, deckRise: 5.8, arcCenter: 0, arc: 150, compartment: 'hull.fore', superfires: 'turret.A', bandstand: 4.0 },
+  { id: 'turret.X', z: -0.25, deckRise: 5.4, arcCenter: 180, arc: 150, compartment: 'hull.aft', superfires: null, bandstand: 3.8 },
 ];
 
 export const TURRET_SPEC = {
   gunhouseW: 10.0, // m across
   gunhouseL: 12.0, // m fore-and-aft (face to rear)
-  gunhouseH: 2.7,
+  // Tall enough to stand up in and to put a door in. A gunhouse is a room with
+  // people in it, and 2.7 m of outside height left 2.2 inside, which is a
+  // doorway you duck through. `assertSuperfiringClearance` at the foot of this
+  // file is what says how much of this the superfiring pairs can afford — at 3.2
+  // B clears A by 0.37 m at full depression once B's barbette is raised the 0.2 m
+// below to pay for the taller roof under it.
+  gunhouseH: 3.6,
   barbetteR: 4.6,
   barrelLength: 16.0,
   barrelR: 0.34, // scales the whole profile; the breech is ~2x this
@@ -130,6 +141,186 @@ export const AA_SPEC = {
   tubR: 1.7,
 };
 
+// --- the stern mounting: a quadruple heavy AA gun ----------------------------
+//
+// What stands where Y turret used to. It is worth saying why the swap is not
+// simply "a smaller gun in the same hole", because almost nothing about the
+// machine is the same.
+//
+// A main-battery turret is a *laying* machine. Fifteen hundred tonnes on a
+// roller path, ten degrees a second, six seconds between rounds: you put the
+// sight where the target will be, wait for the guns to catch up, and fire once.
+// Everything about the turret station — the gyro sight, the demand pip, the
+// firing table behind the range plate — exists to make that wait legible.
+//
+// An AA mounting is a *tracking* machine, and it is the opposite of the turret
+// in every one of those respects:
+//
+//   it trains four times as fast, because its target crosses the sky
+//   it elevates to the vertical, because its target is above it
+//   it trains all the way round, because its target does not stay on one bow
+//   it fires continuously, because the only way to hit an aeroplane with an
+//     unguided shell is to put a great many of them where it is going
+//   it has no gyro sight, because there was not one to have: the layer looks
+//     through an open ring bolted to the gun and the sea swings the whole
+//     picture, which is the difficulty
+//
+// Two consequences fall out of the third point and they are the interesting
+// ones. A gun that trains all round can be trained onto her own superstructure,
+// so it carries a *cut-out cam*: a profile of minimum elevation against bearing,
+// cut so that the barrels physically cannot be depressed into anything of her
+// own. That is a real fitting on a real mounting and it is what stops the after
+// AA shooting the mainmast off. See `cutoutCam` in sternAA.js, which does not
+// hand-draw the profile — it measures it off the ship in this file.
+//
+// And a gun that fires continuously runs out and overheats, so the burst
+// discipline — a second and a half on, a breath off — is the whole of laying it.
+export const STERN_AA = {
+  id: 'aa.stern',
+  z: -0.36, // Y turret's station, unchanged: it is still the aftermost gun
+  compartment: 'hull.aft',
+  // The old barbette is still there. A 4.6 m armoured ring is exactly the
+  // foundation a heavy power mounting wants, and cutting it out to put the new
+  // gun on the bare deck would be a refit nobody would pay for.
+  ringR: 4.6,
+  ringH: 0.9, // Y's `deckRise`: the roller path is where it always was
+
+  // --- getting onto it ----------------------------------------------------------
+  //
+  // The platform is most of a metre above the quarterdeck, which is a climb and
+  // not a step, so the ring is skirted by two courses of plating that turn the
+  // climb into three risers of 300 mm. Three, and each of them well under
+  // `PLAYER.stepUp`, which is the whole trick: the floor probe simply finds the
+  // next one and nobody has to jump or look for a ladder — see deckAccess.js on
+  // why invisible treads are the cheap answer to stairs and why these are not
+  // invisible at all.
+  //
+  // It goes all the way round rather than being one flight on the after side.
+  // That was the old arrangement and it was wrong for a gun whose whole point is
+  // that it trains through 360 degrees: the crew close up from wherever they
+  // happen to be on the quarterdeck, not from one doorway.
+  steps: 2, // courses of plating outside the ring
+  stepRise: 0.30, // m per riser — three of them, deck to platform
+  stepTread: 0.72, // m each course stands out beyond the one above it
+
+  // --- the shield ---------------------------------------------------------------
+  //
+  // Not a tub. There used to be a twelve-sided splinter shield standing round the
+  // whole mounting with a doorway in it, and it was the wrong fitting twice over:
+  // it protected the gun's crew from whichever bearing the enemy was *not* on,
+  // and it walled in a mounting that has to be got at from every side.
+  //
+  // What a gun like this actually carries is a shield on the mounting itself,
+  // below the barrels and turning with them — so it is always between the layer
+  // and whatever he is shooting at, which is the only direction the fire is
+  // coming from. Sloped, because a plate you can afford on a mounting this size
+  // is thin, and the only way a thin plate stops anything is by being met at an
+  // angle.
+  shieldHalfW: 2.25, // m either side of the training axis
+  shieldFoot: 1.78, // where its bottom edge stands, forward of the axis
+  shieldHead: 1.02, // ...and where its top edge is: sloped back over the crew
+  shieldLow: 0.16, // m above the platform at the foot
+  // ...and at the head. Set by the barrels and not by eye: the jackets sweep
+  // down to about 1.95 over the shield's top edge at full depression, so this
+  // plus its rolled cap has to stay under that or the guns saw through their own
+  // shield on the way down.
+  shieldHigh: 1.86,
+  shieldWing: 0.95, // how far the wings wrap back down each side
+  shieldPlate: 0.10,
+
+  // --- the gun ---------------------------------------------------------------
+  barrels: 4,
+  barrelLength: 4.2,
+  barrelR: 0.055, // bore comes out ~90 mm on the profile in mounts.js
+  barrelSpacing: 0.72, // between adjacent barrels; four abreast, as a quad is
+  trunnionZ: 0.55, // forward of the training axis
+  // Above the tub floor, and it is the one dimension here with a hard floor
+  // under it. The guns overhang the way in when the mounting is at rest, so
+  // whatever else is true they have to be over a standing man's head — hence
+  // this and not the metre and a half a quadruple automatic really carries.
+  // The crew work under them, which is what the seats being up at 1.55 is
+  // about: on this mounting you sit level with the breeches, not beside them.
+  trunnionY: 2.15,
+
+  // --- how it moves ----------------------------------------------------------
+  // Power training, and these are the rates the engines hold. Four and a half
+  // times the turret's traverse and five times its elevation, which is what a
+  // mounting a hundredth of the weight can afford.
+  traverseRate: 46, // deg/s
+  elevateRate: 34, // deg/s
+  trainAccel: 90, // deg/s^2 — it gets to those rates in half a second
+  elevAccel: 70,
+  arcCenter: 180, // rests pointing astern
+  arc: 180, // all round: there is no blind bearing, only a cut-out
+  elevMin: -8, // and this is only the floor *outboard*; the cam raises it
+  elevMax: 90, // straight up, which is where the target is
+  camClear: 2.0, // m the barrels must clear anything of her own by
+  camMargin: 1.5, // extra degrees on top of the cam, so it is not a shave
+
+  // --- how it shoots ---------------------------------------------------------
+  // One round every `cyclic` seconds, taken from the four barrels in turn: a
+  // little over 500 rounds a minute between them, 130 apiece, which is what a
+  // quadruple automatic of this calibre does.
+  cyclic: 0.115, // s between rounds
+  clip: 32, // rounds in the ready-use racks before the loaders have to refill
+  reload: 4.2, // s to refill them
+  // Heat. Every round puts this much into the barrels and they shed it at
+  // `cool` a second; at 1 the mounting ceases fire and will not answer the
+  // trigger again until it is back under `resume`. Sustained fire therefore
+  // comes out at about four rounds a second against nine in a burst, and the
+  // gun is only worth having if you fire it in bursts.
+  heatPerRound: 0.050,
+  cool: 0.21, // per second
+  resume: 0.55,
+  spread: 0.42, // degrees of dispersion, cone half-angle
+  // --- what one round does to the machine ---------------------------------------
+  //
+  // Everything below is a departure from the main battery's figures, and every
+  // one of them is a departure in the same direction: shorter. A 16-inch gun's
+  // event lasts long enough to watch; this one has to be over before the next
+  // round leaves, or nine of them a second stop being nine events and become one
+  // continuous smear.
+  // A 40 mm gun recoils about 200 mm on a 2.25 m barrel — nine per cent of its
+  // own length, which is proportionally *more* than the sixteen-inch figure and
+  // not less. So this is not a small number: at 0.5 the stroke comes out near
+  // 300 mm on our 4.2 m barrel, which is seven per cent of it and is the single
+  // most visible thing the gun does apart from the flash.
+  recoilScale: 0.50, // fraction of the full gun recoil travel, in muzzleBlast
+  // The recuperator. In and out inside a tenth of a second — which is less than
+  // the cyclic interval, so each barrel is back in battery just before its turn
+  // comes round again. That margin is what makes the four of them read as four
+  // guns taking turns rather than as one thing vibrating.
+  recoilIn: 0.03, // s to the back stop
+  recoilOut: 0.075, // s to run out again
+  // How much of the main battery's flash duration this one gets. A 40 mm flash
+  // is genuinely over in about a fiftieth of a second.
+  flashLife: 0.40,
+  lightLife: 0.55, // and how long the light it throws on her lasts
+  // The soft half of the flash — the blast disc and the fireball — cut right
+  // down. Both are sized for a naval rifle seen from a hundred metres off the
+  // beam; on a mounting you are standing beside they are a haze over half the
+  // quarterdeck. The flame out of the bore is what should read here, and it does.
+  discScale: 0.42,
+  ballScale: 0.30,
+  // Propellant smoke, as a fraction of what the same code gives a naval rifle.
+  // Small, because it arrives nine times a second: at 1.0 the mounting builds a
+  // permanent fog bank round itself inside two seconds of firing.
+  smokeScale: 0.26,
+  // ...and every so often the full amount, so that a long burst does leave a
+  // drifting cloud rather than nothing at all. This is the round interval.
+  smokePuff: 6,
+  // The shove one round gives the mounting, in degrees per second on each of the
+  // two springs in mounts.js. `rise` is the muzzles climbing — the same thing
+  // that walks any automatic off its target — and `swing` is the couple about
+  // the training axis, which alternates as the four barrels take their turn from
+  // one side of the cradle to the other and is what makes it waggle rather than
+  // simply nod.
+  shudderRise: 40,
+  shudderSwing: 18,
+  // How hard the empty case is thrown out of the breech, m/s.
+  caseSpeed: 3.4,
+};
+
 // --- superstructure ----------------------------------------------------------
 export const SUPER = {
   bridge: { z: +0.06, base: [10, 14] }, // pagoda foot: [width, length] m
@@ -151,6 +342,10 @@ export const COMPONENT_STATS = {
   'turret.*': { hp: 250, armor: 14, critical: ['magazine (if penetrated)'] },
   'casemate.*': { hp: 60, armor: 4 },
   'aa.*': { hp: 30, armor: 0 },
+  // The stern mounting is not one of the light tubs. It is a powered quadruple
+  // on Y turret's barbette with splinter plating round it, and it takes a good
+  // deal more than a strafing run to put it out.
+  'aa.stern': { hp: 150, armor: 5, critical: ['after AA'] },
   // The two towers are tougher than they were, and for a reason: neither of
   // them comes off her any more, so their hit points are no longer "how long
   // until this falls over" but "how long until there is nothing left up there
@@ -238,6 +433,10 @@ export const STRUCTURE = {
   // The AA mounts are small, they stand on deckhouses, and they are not built
   // of anything: they go over as a unit or not at all.
   'aa.*': { mass: 11_000, foot: { r: 2.0 }, spine: null },
+  // Twenty times that, and it does not stand on a deckhouse — it stands on an
+  // armoured ring built into the hull, which is why it has no `attach`: there is
+  // nothing under it that can be shot away and take it with it.
+  'aa.stern': { mass: 96_000, foot: { r: 4.4 }, spine: null, noTopple: true },
   // A gunhouse is 1500 t of face-hardened plate on a roller path. Nothing
   // topples it. What happens to a turret is that the magazine under it lets go
   // and throws it off the barbette — see `magazine` in burst.js.
@@ -266,6 +465,9 @@ export const BUOYANCY = {
   // A gun tub is a shallow open cylinder. Upside down it traps a bubble under
   // itself, and then it does not.
   'aa.*': 7,
+  // A hundred tonnes of mounting with a tub round it. It takes the bubble down
+  // with it.
+  'aa.stern': 0,
   // The conning tower is a solid column of face-hardened plate with an armoured
   // tube down the middle of it. There is no air in that.
   bridge: 0,
@@ -318,4 +520,9 @@ export const WOUNDS = {
   // is the one stamp big enough for its cost to be worth thinking about.
   MAGAZINE: { crater: 15, scorch: 34, punch: false, hole: 90 },
   IMPACT: { crater: 1.4, scorch: 5.0, punch: false, hole: 0.6 },
+  // A 40 mm round off the stern mounting. It scars paint and cuts a man in half
+  // and it does not trouble a battleship's plating — which is the point: the
+  // reason a ship carries a great many of these rather than a few more 16-inch
+  // is that what she is shooting at is made of aluminium.
+  FLAK: { crater: 0.45, scorch: 1.7, punch: false, hole: 0.10 },
 };

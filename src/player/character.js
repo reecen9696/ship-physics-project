@@ -25,10 +25,15 @@ const BISECT = 7; // halvings to land on the surface: 0.15 / 2^7 ~= 1 mm
 // deliberately just above `stepUp`: anything shorter than that is not a wall at
 // all, it is a coaming, and the floor probe walks over it. That one line is the
 // whole of the stair-stepping logic.
-const wallHeights = () => [
+//
+// `h` is how tall the body is *now*, which is not a constant once he can
+// crouch — and the top sample being at the crown is the entire reason crouching
+// gets you under things. Sampling a standing man's shoulder height while he is
+// on one knee would have him stopped by a beam he is plainly under.
+const wallHeights = (h) => [
   PLAYER.stepUp + 0.1,
-  PLAYER.height * 0.56,
-  PLAYER.height - PLAYER.radius,
+  h * 0.56,
+  h - PLAYER.radius,
 ];
 // centre plus the four compass points at capsule radius
 const RING = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -65,8 +70,22 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     jumpWanted: 0, // seconds a pressed jump stays remembered for
     knockdownUntil: 0,
     fly: false,
+    climbing: false, // on a ladder's rungs: neither on a deck nor falling off one
     overboard: 0, // times she has put us in the sea
+    // 0 standing, 1 down on one knee, and every value between while he is on the
+    // way. Everything that needs a height reads `height` and `eye` below rather
+    // than PLAYER's, so there is one place that knows how tall he is.
+    crouch: 0,
+    pinned: false, // crouched because there is no room to stand, not by choice
   };
+
+  // How tall he is and where his eye is, this frame. Two lerps, and they are
+  // exported rather than recomputed by the four other files that want them:
+  // a camera at one height and a capsule at another is the sort of disagreement
+  // that shows up as a head clipping through a deckhead.
+  const heightNow = () => PLAYER.height
+    + (PLAYER.crouchHeight - PLAYER.height) * state.crouch;
+  const eyeNow = () => PLAYER.eye + (PLAYER.crouchEye - PLAYER.eye) * state.crouch;
 
   // --- the collision field ----------------------------------------------------
 
@@ -75,7 +94,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   // so the ship's normal has to be saved before the ladders can overwrite it.
   function solidAt(x, y, z) {
     _p.set(x, y, z);
-    const d = colliders.query(_p, _hit);
+    const d = colliders.query(_p, _hit, null, space.skipShapes ?? null);
     if (!extra) return d;
     const nx = _hit.normal.x; const ny = _hit.normal.y; const nz = _hit.normal.z;
     const id = _hit.id;
@@ -87,6 +106,35 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   }
 
   const inside = (x, y, z) => solidAt(x, y, z) > 0;
+
+  // --- ladders ----------------------------------------------------------------
+  //
+  // The one place on this ship where the collision field is not the whole answer.
+  // Every other way up is a flight of invisible treads and needs no code at all —
+  // the floor probe simply finds the next one (see deckAccess.js) — but a flight is
+  // a 35-degree ramp, and the climb from the weather deck to the air-defence
+  // platform is eleven metres in a trunk two metres square. That is a ladder, and a
+  // ladder is vertical.
+  //
+  // So a ladder is a volume, and inside it forward and back are up and down. It is
+  // stated where the trunk is built (battleship/bridgeAccess.js) and arrives here
+  // through the same `extra` the ladders and deck props do, which means a body
+  // handed into a gunhouse — where `extra` is null — cannot be on one.
+  //
+  // `exit` is which way you step off at the head. Without it, arriving at the top
+  // leaves you standing over the hole you came up, and the floor probe quite
+  // correctly drops you back down it.
+  function ladderAt(x, y, z) {
+    const list = extra && extra.ladders;
+    if (!list) return null;
+    for (const L of list) {
+      if (Math.abs(x - L.c.x) > L.h.x) continue;
+      if (Math.abs(z - L.c.z) > L.h.z) continue;
+      if (y < L.bottom - 0.1 || y > L.top + 0.4) continue;
+      return L;
+    }
+    return null;
+  }
 
   function bisect(x, z, yIn, yOut) {
     let lo = yIn; let hi = yOut;
@@ -122,7 +170,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   // into a turret face into sliding along it rather than stopping dead against
   // it — the one thing move-and-slide does that a de-penetration pass does not.
   function resolveWalls() {
-    const heights = wallHeights();
+    const heights = wallHeights(heightNow());
     _wall.set(0, 0, 0);
     let pushed = false;
     for (let it = 0; it < 4; it++) {
@@ -150,7 +198,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   }
 
   function resolveCeiling() {
-    const d = solidAt(pos.x, pos.y + PLAYER.height - PLAYER.radius, pos.z);
+    const d = solidAt(pos.x, pos.y + heightNow() - PLAYER.radius, pos.z);
     if (d > 0 && _hit.normal.y < -0.4) {
       pos.y -= d + 0.01;
       if (vel.y > 0) vel.y = 0;
@@ -178,12 +226,39 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
 
   // --- the step ---------------------------------------------------------------
 
-  // `input` is { forward, strafe, jump, sprint, rise } — the first two in [-1, 1].
+  // Down on one knee, and back up again.
+  //
+  // Going down is unconditional. Coming up is not, and the test is the whole of
+  // it: probe where the crown *would* be if he stood, and if there is ship there,
+  // stay down. That one query is what makes it safe to crouch under a barbette
+  // and let go of the key — without it he stands up inside four inches of armour
+  // and the de-penetration pass shoots him out sideways.
+  //
+  // `pinned` is reported rather than merely acted on, because "the key is not
+  // working" and "there is a deckhead six inches over your head" look identical
+  // from the outside and only one of them is a bug.
+  function resolveCrouch(dt, want) {
+    const rising = !want && state.crouch > 0;
+    state.pinned = rising
+      && solidAt(pos.x, pos.y + PLAYER.height - PLAYER.radius, pos.z) > 0;
+    const target = want || state.pinned ? 1 : 0;
+    const k = PLAYER.crouchRate * dt;
+    state.crouch += Math.min(Math.max(target - state.crouch, -k), k);
+    state.crouch = Math.min(Math.max(state.crouch, 0), 1);
+  }
+
+  // `input` is { forward, strafe, jump, sprint, crouch, rise } — the first two in
+  // [-1, 1].
   function step(dt, input, now) {
+    // Flying is a debug mode and a debug mode has no knees; being handed the
+    // controls back mid-crouch while six metres over the deck is not a state
+    // worth having.
+    resolveCrouch(dt, !!input.crouch && !state.fly);
+
     // Apparent gravity is evaluated at the body's centre, not its feet: the
     // Euler and centrifugal terms scale with distance from the hull's origin,
     // and it costs nothing to ask in the right place.
-    _r.set(pos.x, pos.y + PLAYER.height * 0.5, pos.z);
+    _r.set(pos.x, pos.y + heightNow() * 0.5, pos.z);
     const g = space.apparentGravity(_r, _g);
 
     // The deck's own normal in local space never changes — the geometry does not
@@ -203,7 +278,14 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     );
     if (_want.lengthSq() > 1) _want.normalize();
     if (knocked) _want.set(0, 0, 0);
-    else _want.multiplyScalar(input.sprint ? PLAYER.sprint : PLAYER.walk);
+    else {
+      // There is no crouched run. The three speeds are picked between rather
+      // than blended, and then the pick is faired by how far down he actually
+      // is — so ducking while running slows him over the same eighth of a second
+      // the knees take, instead of dropping him to a shuffle on the key-down.
+      const upright = input.sprint ? PLAYER.sprint : PLAYER.walk;
+      _want.multiplyScalar(upright + (PLAYER.crouchWalk - upright) * state.crouch);
+    }
 
     if (state.fly) {
       // Debug only: walk out over the sea to look at her, or get onto a deck
@@ -212,6 +294,37 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
       vel.set(_want.x * 2.5, (lift + input.rise * 8) * 1.2, _want.z * 2.5);
       pos.addScaledVector(vel, dt);
       state.grounded = false;
+      return;
+    }
+
+    // --- on a ladder ----------------------------------------------------------
+    //
+    // Only once you have asked to be: standing at the foot of one with the feet on
+    // the deck, forward still walks, so you can go back down the passage you came
+    // up. Off the deck inside the trunk you are on it whatever you press, which is
+    // what stops a released key dropping you eleven metres.
+    const ladder = ladderAt(pos.x, pos.y, pos.z);
+    state.climbing = false;
+    if (ladder && !knocked && (!state.grounded || input.forward > 0)) {
+      state.climbing = true;
+      const atTop = pos.y >= ladder.top - 0.02;
+      vel.set(0, atTop ? 0 : input.forward * PLAYER.climb, 0);
+      // Strafe still works, at a shuffle: it is how you get off at the bottom
+      // without having to walk backwards down a passage you cannot see.
+      const side = 0.45;
+      vel.x = -cos * input.strafe * PLAYER.walk * side;
+      vel.z = sin * input.strafe * PLAYER.walk * side;
+      pos.y = Math.min(Math.max(pos.y + vel.y * dt, ladder.bottom), ladder.top);
+      pos.x += vel.x * dt;
+      pos.z += vel.z * dt;
+      // At the head, forward walks you off it — the one bit of the climb the
+      // player should not have to think about, because the alternative is standing
+      // on the hatch wondering why the deck is not holding you up.
+      if (atTop && input.forward > 0) pos.addScaledVector(ladder.exit, PLAYER.walk * 0.7 * dt);
+      resolveWalls();
+      state.grounded = false;
+      state.standingOn = 'a ladder';
+      state.coyote = 0;
       return;
     }
 
@@ -360,7 +473,10 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     state.grounded = false;
     state.coyote = 0;
     state.jumpWanted = 0;
-    const floor = topSurface(pos.x, pos.z, pos.y + 2.5, pos.y - 2.5);
+    // Downward-biased, and not far up. A room has a deckhead as well as a deck,
+    // and a probe that starts above it finds the roof and stands you on it —
+    // which is what "arrive inside a gunhouse" looked like the first time.
+    const floor = topSurface(pos.x, pos.z, pos.y + 0.6, pos.y - 3.5);
     if (floor !== null) pos.y = floor + 0.02;
   }
 
@@ -382,7 +498,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
   // for itself.
   function knockback(localCenter, magnitude, radius, now) {
     const dx = pos.x - localCenter.x;
-    const dy = pos.y + PLAYER.height * 0.5 - localCenter.y;
+    const dy = pos.y + heightNow() * 0.5 - localCenter.y;
     const dz = pos.z - localCenter.z;
     const dist = Math.hypot(dx, dy, dz);
     if (dist > radius) return;
@@ -406,6 +522,11 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     position: pos, // ship-local, at the feet
     velocity: vel, // ship-local
     get speed() { return Math.hypot(vel.x, vel.z); },
+    // How tall he is and where his eye is *now*, which is not PLAYER.height and
+    // PLAYER.eye the moment he can crouch. Everything that draws him or points a
+    // camera out of him reads these.
+    get height() { return heightNow(); },
+    get eye() { return eyeNow(); },
     groundNormal,
     state,
     step,
@@ -416,7 +537,7 @@ export function createCharacter({ space: home, extra: homeExtra = null, spawn })
     get space() { return space; },
     // for anything that wants the player in the ocean world — a shell, a
     // rangefinder, another ship
-    worldPosition(out) { return space.toWorld(_tmp.set(pos.x, pos.y + PLAYER.eye, pos.z), out); },
+    worldPosition(out) { return space.toWorld(_tmp.set(pos.x, pos.y + eyeNow(), pos.z), out); },
     worldVelocity(out) { return space.velocityToWorld(pos, vel, out); },
   };
 }

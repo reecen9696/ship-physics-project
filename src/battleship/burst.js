@@ -72,6 +72,23 @@ export function createBurst({ fx, splash, shards }) {
       return;
     }
 
+    if (kind === 'FLAK') {
+      // The round destroying itself in the air, which is a different event from
+      // anything else in this file: there is nothing for it to hit, so there is
+      // no spray, no spall and no fire — only a hard little flash and the dirty
+      // grey-black puff that stands where it was and drifts off downwind. A sky
+      // full of those is what anti-aircraft fire looks like from underneath, and
+      // each one on its own is meant to be almost nothing. It is the *number* of
+      // them that reads.
+      fx.emit(at, 3, {
+        kind: 1, rise: 0.5, spread: 0.5 * s, size: 1.5 * s, life: 0.14, grow: 3.0,
+      });
+      fx.emit(at, 5, {
+        kind: 0, rise: 1.4, spread: 1.4 * s, size: 1.9 * s, life: 4.5, grow: 1.8,
+      });
+      return;
+    }
+
     if (kind === 'IMPACT') {
       // Steel on steel: no fire, a lot of dust off the paint, and a shower of
       // whatever was already loose.

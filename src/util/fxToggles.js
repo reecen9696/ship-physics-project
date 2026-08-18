@@ -1,4 +1,4 @@
-import { uniform } from 'three/tsl';
+import { uniform } from '../scene/uniforms.js';
 
 // Every effect on a hull that is coupled to the sea or to the ship's own motion,
 // in one switchable registry.

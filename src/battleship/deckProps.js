@@ -5,7 +5,7 @@ import {
 import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
 import {
-  SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS, AA_SPEC, COMPARTMENTS,
+  SHIP, SUPER, TURRETS, TURRET_SPEC, AA_MOUNTS, AA_SPEC, STERN_AA, COMPARTMENTS,
 } from './spec.js';
 import { deckY, zOf, halfBeamAt, STEEL, STEEL_DARK } from './hull.js';
 import { PLAYER } from '../player/spec.js';
@@ -682,6 +682,12 @@ function houses() {
     const d = t.bandstand ? TURRET_SPEC.barbetteR * 2.5 * 1.26 : TURRET_SPEC.barbetteR * 2;
     add(t.z - d / 2 / L, t.z + d / 2 / L, w / 2);
   }
+  // and the stern mounting, steps and all — a round thing quoted as a square one,
+  // which the metre-and-a-bit pad round every entry in this list more than covers.
+  {
+    const r = STERN_AA.ringR + STERN_AA.steps * STERN_AA.stepTread;
+    add(STERN_AA.z - r / L, STERN_AA.z + r / L, r);
+  }
   return list;
 }
 const HOUSES = houses();
@@ -858,8 +864,12 @@ export function deckPropPlacements() {
   for (const side of [-1, 1]) {
     add('hatch', { z: -0.048, hug: 1.3, side, yaw: -side * (Math.PI / 2) });
     add('scuttle', { z: 0.130, edge: 1.5, side });
-    // forward of the shelter deck, where the strip opens out again
-    add('cowl', { z: 0.083, hug: 1.0, side, scale: 1 + jit(0.08) });
+    // Forward of the shelter deck, where the strip opens out again — and aft of
+    // the bridge's ladder trunk, which now stands on this patch of deck against
+    // the pagoda's starboard side (see bridgeAccess.js). At 0.083 the bell of this
+    // cowl came through the trunk's after plating, which you could see from inside
+    // the trunk while climbing it.
+    add('cowl', { z: 0.075, hug: 1.0, side, scale: 1 + jit(0.08) });
     add('mushroom', { z: 0.112, hug: 0.95, side });
   }
   // A fairlead for the midships spring, and no bitts to go with it: a 0.6 m
@@ -972,8 +982,16 @@ export function deckPropSolids() {
   const boxes = [];
   for (const p of deckPropPlacements()) {
     const s = SOLID[p.kind];
-    const c = Math.abs(Math.cos(p.yaw));
-    const sn = Math.abs(Math.sin(p.yaw));
+    // A yawed box is given the box its own box sweeps, which is generous the
+    // right way round for something meant to be walked round rather than
+    // through. A yawed *cylinder* is given nothing of the sort — a drum turned
+    // 25 degrees is exactly the same drum — and applying the sweep to one grows
+    // it by a third, which is enough to make two drums standing side by side
+    // report as overlapping and enough to make the player bump an obstacle that
+    // is not there.
+    const round = s.hx === s.hz;
+    const c = round ? 1 : Math.abs(Math.cos(p.yaw));
+    const sn = round ? 0 : Math.abs(Math.sin(p.yaw));
     boxes.push({
       id: `prop.${p.kind}`,
       c: new Vector3(p.x, p.y + s.y0 + s.hy * p.scale, p.z),
@@ -1074,6 +1092,7 @@ function assertClearance(list) {
 // --- the build ----------------------------------------------------------------
 
 const _v = new Vector3();
+const _from = new Vector3();
 const _q = new Quaternion();
 const UP = new Vector3(0, 1, 0);
 
@@ -1245,7 +1264,11 @@ export function buildDeckProps({ materials, onDetach = null }) {
     _queue.push({ x: point.x, y: point.y, z: point.z, r: radius, speed });
     for (let i = 0; i < _queue.length; i++) {
       const q = _queue[i];
-      _v.set(q.x, q.y, q.z);
+      // Its own scratch, not `_v`: detach() uses `_v` to build the impulse and
+      // is handed this as the point it is thrown away from, so sharing one
+      // vector means the first prop in a sweep overwrites the blast centre and
+      // every prop after it is measured against a direction.
+      _from.set(q.x, q.y, q.z);
       for (const p of props) {
         if (!p.alive) continue;
         // Lashed cargo is harder to shift than loose — that is what the rope is
@@ -1253,8 +1276,8 @@ export function buildDeckProps({ materials, onDetach = null }) {
         // does. A drum is wider again: it does not have to be knocked over to
         // let go, only reached.
         const reach = p.lashed ? 0.55 : (p.kind === 'drum' ? 1.8 : 1.4);
-        if (p.centre.distanceTo(_v) > q.r * reach) continue;
-        detach(p, _v, q.speed);
+        if (p.centre.distanceTo(_from) > q.r * reach) continue;
+        detach(p, _from, q.speed);
         if (cook && p.kind === 'drum') {
           fired.push(p.centre.clone());
           _queue.push({

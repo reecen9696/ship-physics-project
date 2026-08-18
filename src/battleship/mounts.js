@@ -5,8 +5,11 @@ import {
 import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
 import { TURRET_SPEC, AA_SPEC, CASEMATES } from './spec.js';
-import { doorHole, bandstandDoorHole, buildTurretInterior } from './turretHouse.js';
-import { STEEL, STEEL_DARK } from './hull.js';
+import {
+  doorHole, bandstandDoorHole, buildTurretInterior, buildChamber, roomRect, chamberRoomRect, PLATE, HOUSE, chamber, BANDSTAND_DOOR_H,
+} from './turretHouse.js';
+import { bulkheadLight, doorLight, BATTLE_LAMP, DOOR_LAMP } from './bulkheadLight.js';
+import { STEEL, STEEL_DARK, deckY, zOf } from './hull.js';
 
 // Every gun mount on the ship is the same machine: a fixed root on the hull, a
 // yaw pivot that trains, and one or more elevation pivots that carry barrels.
@@ -26,11 +29,44 @@ const approach = (cur, target, maxStep) => cur + clamp(target - cur, -maxStep, m
 // A gunhouse: side profile extruded across the beam, with a sloped face and a
 // slightly lower rear, so it reads as an armoured box and not a shipping crate.
 //
-// `door` punches a hole through the profile. The extrusion runs across the beam,
-// so one hole in the two-dimensional shape comes out as a doorway to port *and*
-// one to starboard, complete with a lined jamb, which is both what a turret has
-// and rather less work than cutting two. See turretHouse.js.
-function gunhouseGeometry(w, l, h, door = false) {
+// `hollow` is the difference between a turret and a turret you can stand in, and
+// it is not the obvious change.
+//
+// The obvious change is to punch the door through the profile: the extrusion
+// runs across the beam, so one hole gives a doorway to port and one to starboard
+// for free. What that actually produces is a *tunnel* bored through ten metres
+// of solid block — and its four walls, the floor and roof and both jambs, run
+// the whole way through. Eight and a half of those ten metres are inside the
+// room. They are drawn, they have no collision, and they are the walls you keep
+// walking through.
+//
+// So the house is built hollow instead: the section is extruded as a ring with
+// the room punched out of it, which leaves it open at either side, and the two
+// sides are closed with plates that carry the door and the window. A hole in a
+// plate two hundred millimetres thick is a doorway. A hole in a ten-metre block
+// is a corridor.
+//
+// Returns a list, because an extrusion is not indexed and there is nothing to be
+// gained by merging three of them.
+function rectShape(r) {
+  const s = new Shape();
+  s.moveTo(r.z0, r.y0);
+  s.lineTo(r.z1, r.y0);
+  s.lineTo(r.z1, r.y1);
+  s.lineTo(r.z0, r.y1);
+  s.closePath();
+  return s;
+}
+
+// shape x -> ship z, shape z -> ship -x
+const place = (g, from) => {
+  g.translate(0, 0, from);
+  g.rotateY(-Math.PI / 2);
+  return g;
+};
+const extrude = (shape, depth) => new ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+
+function gunhouseGeometry(w, l, h, hollow = false) {
   const p = new Shape();
   p.moveTo(-l / 2, 0);
   p.lineTo(l / 2, 0);
@@ -39,29 +75,45 @@ function gunhouseGeometry(w, l, h, door = false) {
   p.lineTo(-l / 2 + 1.0, h);
   p.lineTo(-l / 2, h * 0.8);
   p.closePath();
-  if (door) p.holes.push(doorHole(Shape));
-  const g = new ExtrudeGeometry(p, { depth: w, bevelEnabled: false });
-  g.translate(0, 0, -w / 2);
-  g.rotateY(-Math.PI / 2); // profile x -> ship z, extrusion z -> ship x
-  return g;
+  if (!hollow) return [place(extrude(p, w), -w / 2)];
+
+  const room = roomRect();
+  p.holes.push(rectShape(room)); // the ring: house minus room
+  const out = [place(extrude(p, w), -w / 2)];
+
+  // and the sides, which are the only place a hole becomes a doorway
+  const plate = rectShape(room);
+  plate.holes.push(...doorHole(Shape));
+  out.push(place(extrude(plate, PLATE), -w / 2));
+  out.push(place(extrude(plate, PLATE), w / 2 - PLATE));
+  return out;
 }
 
-// The blocky raised deck a superfiring turret stands on, with a passage cut
-// through it at deck level. Same trick as the gunhouse: the profile is in the
-// (z, y) plane and the extrusion runs across the beam, so one hole gives a way
-// in from port and one from starboard.
-function bandstandGeometry(w, l, h, facing) {
+// The blocky raised deck a superfiring turret stands on, with the working
+// chamber hollowed out of it and a passage in at deck level.
+//
+// Built exactly the way the gunhouse is, and for exactly the same reason: a hole
+// bored through eleven metres of solid block is not a doorway, it is a corridor,
+// and its floor and roof and both jambs stand across the middle of the room. So
+// the section is extruded as a ring with the chamber punched out, and the two
+// sides are closed with plates that carry the passage.
+function bandstandGeometry(w, l, h, facing, turret) {
   const p = new Shape();
   p.moveTo(-l / 2, -h / 2);
   p.lineTo(l / 2, -h / 2);
   p.lineTo(l / 2, h / 2);
   p.lineTo(-l / 2, h / 2);
   p.closePath();
-  p.holes.push(bandstandDoorHole(Shape, h, facing));
-  const g = new ExtrudeGeometry(p, { depth: w, bevelEnabled: false });
-  g.translate(0, 0, -w / 2);
-  g.rotateY(-Math.PI / 2);
-  return g;
+
+  const room = chamberRoomRect(turret, h);
+  p.holes.push(rectShape(room));
+  const out = [place(extrude(p, w), -w / 2)];
+
+  const plate = rectShape(room);
+  plate.holes.push(bandstandDoorHole(Shape, h, facing, turret));
+  out.push(place(extrude(plate, PLATE), -w / 2));
+  out.push(place(extrude(plate, PLATE), w / 2 - PLATE));
+  return out;
 }
 
 // A gun barrel along +z with its breech at the origin.
@@ -130,7 +182,7 @@ function barrelBoreGeometry(length, r) {
 }
 
 // shell and bore in one buffer: two colours, one draw call, one mesh to elevate
-function makeBarrel(length, r, mk, material) {
+export function makeBarrel(length, r, mk, material) {
   return new Mesh(merge([
     mk(barrelShellGeometry(length, r), STEEL_DARK, 0.4),
     mk(barrelBoreGeometry(length, r), BORE_BLACK, 0.95),
@@ -138,7 +190,55 @@ function makeBarrel(length, r, mk, material) {
 }
 
 // shared traverse/elevation behaviour
-function makeMount({ id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevMin, elevMax, damage }) {
+//
+// `elevFloor(yaw)` is the one thing here that is not the same for every mount.
+// Most guns on this ship have a single depression stop and it is a number; a
+// mount that trains all the way round has a *cut-out cam* instead — a floor that
+// varies with bearing, cut so the barrels cannot come down onto anything of her
+// own. Passing it as a function rather than as a table keeps this file ignorant
+// of what is standing on her deck, which is the whole point: see sternAA.js.
+// --- what a gun going off does to the mounting it is bolted to ----------------
+//
+// The barrel coming back is drawn on the barrel (muzzleBlast.js) and it is only
+// half of what you see. The other half is that the *mount* answers: thirty
+// tonnes of it on a roller path takes the reaction of every round through its
+// trunnions and its training rack, and what that looks like is a nod and a
+// waggle that never quite settle while the gun is firing.
+//
+// A decaying sine per round is the obvious way to write it and it is the wrong
+// one, because rounds arrive faster than any such curve rings down and the
+// overlaps are what the effect *is*. So it is a spring: the mounting has a rest
+// position, a stiffness and some damping, and firing a round gives it a shove.
+// Fire once and it nods and settles; fire nine a second and it never gets back
+// to rest, which is exactly the judder an automatic has and is impossible to
+// fake with a per-round animation.
+//
+// `freq` is the mounting's own frequency in Hz, `damp` its damping ratio.
+const SHUDDER = {
+  freq: 7.0,
+  damp: 0.42,
+  // Hard stops, so a runaway or a very long burst cannot walk the guns off the
+  // target. At these figures a sustained burst holds about half a degree of
+  // muzzle rise, which is a real number for a mounting this size and small
+  // enough that the layer can hold through it.
+  maxRise: 1.1, // degrees
+  maxSwing: 0.7,
+};
+
+export function makeMount({
+  id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevMin, elevMax, damage,
+  barrelR = 0.34, elevFloor = null,
+}) {
+  // The mounting's displacement from rest, in degrees, and its rate. Two
+  // independent springs: one in elevation (the muzzles climbing) and one in
+  // train (the whole mounting slewing a hair against its rack).
+  const shudder = {
+    rise: 0, riseVel: 0, swing: 0, swingVel: 0,
+  };
+  const W = 2 * Math.PI * SHUDDER.freq;
+  const K = W * W;
+  const C = 2 * SHUDDER.damp * W;
+
   const m = {
     id,
     kind,
@@ -146,6 +246,10 @@ function makeMount({ id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevM
     yawPivot,
     guns, // [{ pivot, barrel }]
     spec,
+    // The profile radius the barrels were lathed from. Everything about firing
+    // this mount scales off it — see muzzleBlast.js — so it is carried on the
+    // mount rather than looked up from a spec table by whoever pulls the trigger.
+    barrelR,
     arcCenter, // rest heading, deg
     arc, // half-width of traverse either side of arcCenter, deg (180 = all round)
     elevMin,
@@ -160,20 +264,68 @@ function makeMount({ id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevM
       m.targetYaw = yaw;
       m.targetElev = elev;
     },
+    // The floor at a given bearing: the depression stop, or the cut-out cam if
+    // this mount has one. Asked by the mount below and by the layer's sight, so
+    // the two cannot disagree about where the gun may point.
+    floorAt(yaw) {
+      return elevFloor ? Math.max(m.elevMin, elevFloor(yaw)) : m.elevMin;
+    },
+    // A round leaving. `rise` is the shove up the elevation spring and `swing`
+    // the shove across the training one, both in degrees per second — a rate,
+    // not a displacement, because what a round delivers is an impulse and what
+    // decides how far the mounting actually moves is how stiff it is.
+    //
+    // Whoever pulls the trigger says how hard, because it is a property of the
+    // round and not of the mounting: see `automatic.shudder` in sternAA.js.
+    shove(rise, swing = 0) {
+      shudder.riseVel += rise;
+      shudder.swingVel += swing;
+    },
+    get shudder() { return shudder; },
     // train and elevate toward the target at the mount's own rates, inside its arc
     update(dt) {
+      m.settle(dt);
       if (m.destroyed) return;
       const relTarget = clamp(wrap180(m.targetYaw - m.arcCenter), -m.arc, m.arc);
       const relNow = wrap180(m.yaw - m.arcCenter);
       const rel = approach(relNow, relTarget, spec.traverseRate * dt);
       m.yaw = m.arcCenter + rel;
-      m.elev = approach(m.elev, clamp(m.targetElev, m.elevMin, m.elevMax), spec.elevateRate * dt);
+      // Against the floor at the bearing she has *arrived* at, not the one she
+      // left: a mount training across the cut-out has to lift as it goes, which
+      // is exactly what the cam does to it on a real mounting.
+      const floor = m.floorAt(m.yaw);
+      m.elev = approach(m.elev, clamp(m.targetElev, floor, m.elevMax), spec.elevateRate * dt);
       m.apply();
+    },
+    // One step of the two springs. Substepped, because a stiff spring integrated
+    // at a long frame is a spring that gains energy — and this one is shoved
+    // nine times a second, so it would find that energy and diverge into a gun
+    // waving about the sky.
+    settle(dt) {
+      let left = Math.min(dt, 0.25);
+      while (left > 1e-6) {
+        const h = Math.min(left, 1 / 240);
+        shudder.riseVel += (-K * shudder.rise - C * shudder.riseVel) * h;
+        shudder.rise += shudder.riseVel * h;
+        shudder.swingVel += (-K * shudder.swing - C * shudder.swingVel) * h;
+        shudder.swing += shudder.swingVel * h;
+        left -= h;
+      }
+      shudder.rise = clamp(shudder.rise, -SHUDDER.maxRise, SHUDDER.maxRise);
+      shudder.swing = clamp(shudder.swing, -SHUDDER.maxSwing, SHUDDER.maxSwing);
     },
     apply() {
       // +yaw is to starboard, which is -x: a rotation about +y turns +z toward +x
-      yawPivot.rotation.y = -m.yaw * DEG;
-      for (const g of guns) g.pivot.rotation.x = -(m.elev + (g.droop || 0)) * DEG;
+      //
+      // The shudder is added here rather than to `yaw` and `elev` themselves,
+      // which is the whole point of it being a separate pair of numbers: where
+      // the gun is *laid* is what the sight, the cut-out cam and the readout all
+      // ask about, and that must not wobble. What wobbles is where the barrels
+      // happen to be pointing this frame — which is also where the shells go,
+      // and so is a real part of the gun's dispersion.
+      yawPivot.rotation.y = -(m.yaw + shudder.swing) * DEG;
+      const e = m.elev + shudder.rise;
+      for (const g of guns) g.pivot.rotation.x = -(e + (g.droop || 0)) * DEG;
     },
     // Killed: paint scorched, guns drooped at random, and no more motion. This
     // is the visual half of a kill; the game decides when to call it.
@@ -201,7 +353,7 @@ function makeMount({ id, kind, root, yawPivot, guns, spec, arcCenter, arc, elevM
 
 // --- main battery twin turret ------------------------------------------------
 export function createMainTurret({
-  id, materials, arcCenter, arc, barbetteHeight, bandstand = 0,
+  id, materials, arcCenter, arc, barbetteHeight, bandstand = 0, turret = null,
 }) {
   const S = TURRET_SPEC;
   const slot = materials.slotOf(id);
@@ -222,9 +374,11 @@ export function createMainTurret({
     // deck level, which is the way into this turret. See turretHouse.js — a
     // superfiring gunhouse is four metres up and a door in its side would open
     // onto nothing.
-    const stand = new Mesh(mk(bandstandGeometry(w, w * 1.15, bandstand, facing), STEEL), M);
-    stand.position.y = bandstand / 2;
-    root.add(stand);
+    for (const g of bandstandGeometry(w, w * 1.15, bandstand, facing, turret)) {
+      const piece = new Mesh(mk(g, STEEL), M);
+      piece.position.y = bandstand / 2;
+      root.add(piece);
+    }
     // A chamfered shoulder so the block does not meet the deck as a hard slab.
     // Kept under `PLAYER.stepUp` so it is a threshold to walk over on the way in
     // at the passage rather than a step to be climbed.
@@ -242,12 +396,151 @@ export function createMainTurret({
   root.add(yawPivot);
 
   const houseZ = -1.0; // the gunhouse sits back on the roller path, its face over the barbette edge
-  const house = new Mesh(mk(gunhouseGeometry(S.gunhouseW, S.gunhouseL, S.gunhouseH, true), STEEL), M);
-  house.position.z = houseZ;
-  yawPivot.add(house);
-  // The room behind the door. It rides on the yaw pivot, which is what makes the
-  // turret its own coordinate space rather than a moving part of the ship's.
-  yawPivot.add(buildTurretInterior({ materials, id }));
+  // A turret on a bandstand keeps its gunhouse shut: its crew space is the
+  // working chamber below, at deck level, where you can actually walk into it.
+  // Only a turret sitting on the deck gets a door in the side of the house.
+  const hasHouseDoor = bandstand === 0;
+  for (const g of gunhouseGeometry(S.gunhouseW, S.gunhouseL, S.gunhouseH, hasHouseDoor)) {
+    const piece = new Mesh(mk(g, STEEL), M);
+    piece.position.z = houseZ;
+    yawPivot.add(piece);
+  }
+  // --- the battle lights -------------------------------------------------------
+  //
+  // A pair inside every turret's crew space, one on each side wall, burning red.
+  // See bulkheadLight.js for why red and not white.
+  //
+  // Which space that is depends on the turret, and the two are not the same
+  // room: a turret on the deck has its gunhouse open and you walk into the house
+  // itself, and a turret on a bandstand keeps the house shut and its crew space
+  // is the working chamber underneath. Both get lights, because both are rooms
+  // with people in them.
+  const lamps = [];
+  function litRoom({ parent, halfW, y, z, shipY, shipZ, room }) {
+    const lit = [];
+    for (const side of [-1, 1]) {
+      for (const part of bulkheadLight(slot, side)) {
+        // turned to face inboard: it is bolted to the inside of the wall
+        part.rotateY(Math.PI);
+        part.translate(side * halfW, y, z);
+        lit.push(part);
+      }
+    }
+    parent.add(new Mesh(merge(lit), M));
+    // An emitter at each fitting, and not one between them.
+    //
+    // It was one, on the turret's own axis, on the grounds that this room turns
+    // and the lamp rig it feeds is written in the ship's frame — a lamp off the
+    // axis swings as she trains while the fitting it belongs to swings with the
+    // house, and the two come apart. That is true and it was still the wrong
+    // trade: what you actually see standing in here is a room washed evenly in
+    // red from nowhere, with two lamps on the walls that are plainly not lighting
+    // it. A light has to come out of the light. So there are two, one at each
+    // holder, and they are right whenever the turret is anywhere near its resting
+    // bearing — which is where it spends its time, and the error at full train is
+    // a metre in a room nine metres across.
+    for (const side of [-1, 1]) {
+      lamps.push({
+        x: side * halfW, y: shipY, z: shipZ,
+        ext: [0.06, 0.06, 0.10], // the glass itself, near enough
+        room,
+        reach: BATTLE_LAMP.reach,
+        soft: BATTLE_LAMP.soft,
+        color: BATTLE_LAMP.color,
+        level: BATTLE_LAMP.level,
+      });
+    }
+  }
+
+  // A light over each door, on the outside. Same arrangement as the battle
+  // lights inside — one fitting a side, one emitter between them with a box
+  // extent that reaches both, so the nearest point on it from anywhere to port
+  // is the port lamp. These are not confined: they are out in the weather, and
+  // the shadow volume stops them like every other open-deck light.
+  function litDoors({ parent, halfW, y, z, shipY, shipZ }) {
+    const lit = [];
+    for (const side of [-1, 1]) {
+      for (const part of doorLight(slot, side)) {
+        part.translate(side * halfW, y, z);
+        lit.push(part);
+      }
+    }
+    parent.add(new Mesh(merge(lit), M));
+    // One emitter per fitting, and *not* one box spanning the pair.
+    //
+    // The box trick is right for a light inside a room — the nearest point on it
+    // from anywhere in there is the lamp on the near wall — and exactly wrong
+    // for a light on the outside of a solid one. An extent reaching from the
+    // port fitting to the starboard fitting has its surface running straight
+    // through eleven metres of turret, so a fragment on the gunhouse face found
+    // the "nearest point on the light" a few centimetres in front of it and lit
+    // up as though a lamp were buried in the plating. Which is what it looked
+    // like: a yellow blot on the front of the turret and the barrels glowing.
+    for (const side of [-1, 1]) {
+      lamps.push({
+        x: side * (halfW + 0.2), y: shipY, z: shipZ,
+        ext: [0.05, 0.05, 0.08], // the lens, near enough
+        reach: DOOR_LAMP.reach,
+        soft: DOOR_LAMP.soft,
+        color: DOOR_LAMP.color,
+        level: DOOR_LAMP.level,
+      });
+    }
+  }
+
+  if (hasHouseDoor) {
+    // The room behind the door. It rides on the yaw pivot, which is what makes
+    // this turret its own coordinate space rather than a moving part of the
+    // ship's — see player/mountSpace.js.
+    yawPivot.add(buildTurretInterior({ materials, id }));
+    litRoom({
+      parent: yawPivot,
+      halfW: HOUSE.halfW - 0.06,
+      y: HOUSE.floor + 2.15,
+      z: houseZ,
+      // ship frame: the pivot rides `barbetteHeight` above the turret's own
+      // origin, which the caller has already put on the deck at its station
+      shipY: deckY(turret.z) + barbetteHeight + HOUSE.floor + 1.85,
+      shipZ: zOf(turret.z),
+      // the gunhouse, generously: its own walls, and enough height to hold the
+      // room whichever way the lamp sits in it
+      // Height matters as much as width: the bound is centred on the lamp, and
+      // 2.4 put its top out through the roof, which showed as a thin red band
+      // along the gunhouse's top edge. 1.6 keeps it under the plating.
+      room: [HOUSE.halfW + 0.15, 1.6, (HOUSE.fwd - HOUSE.aft) / 2 + 0.6],
+    });
+    // over the gunhouse doors, just clear of the head of the opening
+    litDoors({
+      parent: yawPivot,
+      halfW: S.gunhouseW / 2,
+      y: HOUSE.door.head + 0.30,
+      z: HOUSE.door.z,
+      shipY: deckY(turret.z) + barbetteHeight + HOUSE.door.head + 0.30,
+      shipZ: zOf(turret.z) + HOUSE.door.z,
+    });
+  } else if (turret) {
+    // The working chamber, which does not train and so belongs to the ship.
+    root.add(buildChamber({ materials, id, turret }));
+    const c = chamber(turret);
+    litRoom({
+      parent: root,
+      halfW: c.halfX - 0.06,
+      y: c.floor + 2.15,
+      z: 0,
+      shipY: deckY(turret.z) + c.floor + 1.85,
+      shipZ: zOf(turret.z),
+      room: [c.halfX + 0.15, 1.6, c.halfZ + 0.4],
+    });
+    // and over the passage into the working chamber
+    litDoors({
+      parent: root,
+      halfW: c.outerX,
+      y: c.floor + BANDSTAND_DOOR_H + 0.30,
+      z: c.doorZ,
+      shipY: deckY(turret.z) + c.floor + BANDSTAND_DOOR_H + 0.30,
+      shipZ: zOf(turret.z) + c.doorZ,
+    });
+  }
   // rangefinder hood across the rear of the roof, and the officer's cupola
   const hood = new Mesh(mk(new BoxGeometry(S.gunhouseW * 1.15, 0.9, 1.4), STEEL_DARK, 0.4), M);
   hood.position.set(0, S.gunhouseH + 0.45, -S.gunhouseL / 2 + 1.6);
@@ -283,10 +576,15 @@ export function createMainTurret({
   }
 
   root.traverse((o) => { o.castShadow = true; o.frustumCulled = false; });
-  return makeMount({
+  const mount = makeMount({
     id, kind: 'turret', root, yawPivot, guns, spec: S, arcCenter, arc,
-    elevMin: S.elevMin, elevMax: S.elevMax, damage,
+    elevMin: S.elevMin, elevMax: S.elevMax, damage, barrelR: S.barrelR,
   });
+  // The red battle lights in her crew space, reported for the ship-wide lamp rig
+  // the same way the superstructure reports its window bands. See
+  // bulkheadLight.js, and `setLamps` in shipMaterial.js.
+  mount.lamps = lamps;
+  return mount;
 }
 
 // --- twin AA mount in a tub --------------------------------------------------
@@ -330,7 +628,7 @@ export function createAAMount({ id, materials }) {
   root.traverse((o) => { o.castShadow = true; o.frustumCulled = false; });
   return makeMount({
     id, kind: 'aa', root, yawPivot, guns, spec: S, arcCenter: 0, arc: 180,
-    elevMin: S.elevMin, elevMax: S.elevMax, damage,
+    elevMin: S.elevMin, elevMax: S.elevMax, damage, barrelR: S.barrelR,
   });
 }
 
@@ -370,6 +668,6 @@ export function createCasemate({ id, side, materials }) {
     spec: { traverseRate: S.rate, elevateRate: S.rate },
     // starboard is -x, i.e. yaw +90; port is +x, yaw -90
     arcCenter: side > 0 ? 90 : -90, arc: S.train,
-    elevMin: -5, elevMax: S.elevMax, damage,
+    elevMin: -5, elevMax: S.elevMax, damage, barrelR: S.barrelR,
   });
 }

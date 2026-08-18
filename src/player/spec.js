@@ -21,6 +21,28 @@ export const PLAYER = {
   walk: 5.0, // m/s — the length of her in 36 seconds
   sprint: 8.4,
   jump: 6.2, // m/s off the deck
+
+  // --- down on one knee ---------------------------------------------------
+  //
+  // Crouching is three numbers and one rule, and the rule is the part that has
+  // to be right: you may always go down, and you may only come up if there is
+  // room over your head. Without it, ducking under the barbette of B turret and
+  // letting go of the key stands you up inside four inches of armour, and the
+  // de-penetration pass then fires you out sideways at whatever speed it takes
+  // to clear it.
+  //
+  // The eye does not sit at the same fraction of the height it does standing.
+  // A man on one knee has his head much closer to the top of him than a man
+  // standing has, and setting the crouched eye by scaling 1.62/1.78 puts the
+  // camera in his chest.
+  crouchHeight: 1.22, // m, crown to sole with the knees bent
+  crouchEye: 1.08, // m
+  crouchWalk: 2.3, // m/s — a shuffle, and there is no crouched run
+  // How fast he goes down and comes up, as a fraction of the way per second.
+  // Fast: this is a key you tap to get under something, and a slow duck is a
+  // key that appears not to have worked.
+  crouchRate: 8.5,
+
   ground: 32, // 1/s toward the wanted velocity with feet on the deck: ~50 ms to
   // full speed, which is what makes the controls feel connected rather than
   // like steering something heavy
@@ -53,6 +75,16 @@ export const PLAYER = {
   // the floor probe simply finds the next tread.
   stepUp: 0.45, // m
   snapDown: 0.5, // m the feet stay glued to a deck falling away beneath them
+
+  // How fast you go up a ladder.
+  //
+  // A vertical ladder is the one way up this ship that the invisible-tread trick
+  // cannot build: treads make a 35-degree ramp, and the eleven metres from the
+  // weather deck to the air-defence platform would want sixteen metres of run that
+  // the pagoda has not got. So a ladder is a *mode* — see `ladderAt` in
+  // character.js — and this is the climb rate in it. Brisk on purpose: a real man
+  // does 0.5 m/s and the eleven metres would take twenty-two seconds.
+  climb: 3.2, // m/s
   maxSlopeCos: Math.cos((52 * Math.PI) / 180), // steeper than this is not a floor
 
   // --- the inertial layer (see shipSpace.js §5) --------------------------------

@@ -53,6 +53,7 @@ export function createMountSpace({
   const alpha = new Vector3();
   let prevRate = 0;
   let prevYaw = getYaw();
+  let yawNow = prevYaw;
   let started = false;
 
   // The parent's apparent gravity at our origin, expressed in our frame, plus
@@ -61,6 +62,7 @@ export function createMountSpace({
 
   function syncHull(dt) {
     const yaw = getYaw();
+    yawNow = yaw;
     quat.setFromAxisAngle(UP, yaw);
     quatInv.copy(quat).invert();
     worldQuat.copy(parent.worldQuaternion).multiply(quat);
@@ -146,6 +148,10 @@ export function createMountSpace({
     velocityToWorld,
     velocityToParent,
     velocityFromParent,
+    // This frame's bearing within its parent. Anything crossing the boundary has
+    // to turn by it: a man facing the bow on deck is facing something else once
+    // he is standing in a turret that has trained thirty degrees.
+    get yaw() { return yawNow; },
     get quaternion() { return quat; },
     get worldQuaternion() { return worldQuat; },
     matrix,

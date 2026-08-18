@@ -82,11 +82,24 @@ export const params = {
   // is very nearly linear in the number of pixels it is asked to fill. Measured
   // here, going from 2 to 1 roughly halves the whole render pass.
   //
-  // 1.5 rather than 2 on a retina display: three quarters of the linear
-  // resolution is still well above what the panel needs to look sharp at arm's
-  // length, and it hands back about a third of the frame. Put it to 2 for
-  // stills, or down to 1 when the frame rate matters more than the edges.
-  renderScale: 1.5,
+  // 1 rather than 1.5, and the reason is that it is not a third of the frame,
+  // it is the whole argument about the frame.
+  //
+  // Measured on deck at night, which is the heaviest thing this scene draws:
+  // 16.2 ms at 1.5, 11.5 ms at 1.25, 7.3 ms at 1. It scales as the square of
+  // this number to three significant figures, because after the draw calls were
+  // brought under control there is nothing left in the frame that is not
+  // fragment work. At 1.5 the GPU alone cannot hold sixty frames a second; at 1
+  // it has twice the budget it needs.
+  //
+  // What is given up is supersampling, not antialiasing: the renderer runs 4x
+  // MSAA (see `antialias` in main.js), which still resolves every geometric edge
+  // — the rails, the rigging, the horizon. What goes is the smoothing MSAA
+  // cannot do, which is on the *shading* rather than the silhouette, and on this
+  // scene that means the specular sparkle on the sea gets busier.
+  //
+  // Put it to 1.5 or 2 for stills, where none of that costs anything.
+  renderScale: 1,
 
   // --- time of day -------------------------------------------------------
   // Not a renderer switch: the whole scene is already shaded from one set of
@@ -100,7 +113,7 @@ export const params = {
   //
   // `timeOfDay` runs 0 = night, 0.45 = first light, 1 = full day, and
   // setTimeOfDay interpolates between whichever two keys bracket it.
-  timeOfDay: 1, // starts in full day; the Sun & sky folder has the slider
+  timeOfDay: 0, // starts at night; the Sun & sky folder has the slider
   timeKeys: [
     {
       at: 0.0,

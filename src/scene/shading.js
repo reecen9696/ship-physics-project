@@ -1,5 +1,5 @@
 import { Color, Vector3, MathUtils } from 'three/webgpu';
-import { uniform } from 'three/tsl';
+import { uniform } from './uniforms.js';
 
 // The scene's shading state, as one set of uniforms.
 //

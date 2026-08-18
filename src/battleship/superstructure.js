@@ -1,8 +1,10 @@
 import {
-  Group, Mesh, BoxGeometry, CylinderGeometry, TorusGeometry, SphereGeometry, Vector3,
+  Group, Mesh, BoxGeometry, CylinderGeometry, TorusGeometry, SphereGeometry,
+  LatheGeometry, Vector2, Vector3,
 } from 'three/webgpu';
 import { paint } from './shipMaterial.js';
 import { merge } from './mergeGeometry.js';
+import { carveBox } from './carve.js';
 import { pushScuttle } from './scuttles.js';
 import { SHIP, SUPER, HULL_NUMBER } from './spec.js';
 import { deckY, zOf, sideAt, STEEL, STEEL_DARK } from './hull.js';
@@ -12,6 +14,9 @@ import {
   airSearchArray, surfaceSearchDish, RIG,
 } from './aerials.js';
 import { fittingGroup } from './fittings.js';
+import { doorLight, DOOR_LAMP } from './bulkheadLight.js';
+import { buildWheelhouse, WHEEL, CONN } from './wheelhouse.js';
+import { buildBridgeAccess, gangwayBearing, connShaft } from './bridgeAccess.js';
 
 // Each builder returns { id, object, damage } where `damage` is the uniform
 // its materials share. Anything that should die as one thing (the pagoda, the
@@ -57,8 +62,44 @@ function unit(id, materials) {
   );
   const object = new Group();
   object.name = id;
-  return { id, object, damage, mk, mkGlass, slot, materials };
+  // Where this unit's lights are, in the ship's frame, for the lamp rig — the
+  // same arrangement as `solids`: stated once, where the thing is built, rather
+  // than a second time as numbers copied into a lighting file that drift the
+  // first time the tower is restyled. See MAX_LAMPS in shipMaterial.js for why
+  // there are so few of them and why one stands for a whole run.
+  const lamps = [];
+  const lamp = (o) => lamps.push(o);
+  return { id, object, damage, mk, mkGlass, slot, materials, lamps, lamp };
 }
+
+// The two lights on this ship, and they are two different things. A window band
+// is a wheelhouse or a chart room: a wide opening, a lot of light, and it throws
+// it a long way down the tower and onto the decks under it. A run of scuttles is
+// a row of cabins: small openings, warmer bulbs, and what they light is the
+// stretch of side deck immediately outside them.
+//
+// The levels are low, and the reason is that these stack. Four window bands up
+// one tower are four emitters that can all reach the same piece of plating, and
+// a level that looks right on its own puts the whole pagoda up like a lantern
+// when the one above and the one below add to it. What is wanted is a warm cast
+// on the surfaces near a light, not a light source in its own right — the panes
+// themselves are the light source, and they are already the brightest thing on
+// the ship.
+//
+// The levels look high next to the old ones and are not: the falloff underneath
+// them changed from a linear ramp to a windowed inverse square, which is very
+// much brighter in the first metre and very much darker by the fifth. That is
+// the whole point — the contrast in the first couple of metres is what reads as
+// a light source rather than as a painted gradient — but it means the number
+// that sets the peak has to go up as the number that sets the spread goes down.
+const LAMP = {
+  window: {
+    color: [0.52, 0.36, 0.17], reach: 22, level: 0.85, soft: 3.4,
+  },
+  scuttle: {
+    color: [0.46, 0.28, 0.12], reach: 14, level: 1.0, soft: 2.4,
+  },
+};
 
 // --- pagoda bridge -----------------------------------------------------------
 // The signature of the type: a conning tower with the bridge levels stacked up
@@ -101,28 +142,83 @@ export function buildBridge({ materials }) {
   // the whole look.
 
   // --- base: a broad blockhouse on the deck, then a narrower one on top ------
-  const base = steel(new BoxGeometry(17, 4.0, 21));
-  base.position.set(0, y0 + 2.0, z0 - 1.0);
-  g.add(base);
-  solid.box('bridge', 0, y0 + 2.0, z0 - 1.0, 8.5, 2.0, 10.5);
-  const base2 = steel(new BoxGeometry(13, 3.4, 15));
-  base2.position.set(0, y0 + 5.7, z0);
-  g.add(base2);
-  solid.box('bridge', 0, y0 + 5.7, z0, 6.5, 1.7, 7.5);
+  //
+  // The lower blockhouse is not a box any more: it has a door in her port side, a
+  // hallway straight through it, and a ladder trunk against her starboard side
+  // that climbs to the air-defence platform in one go. That is the way to the
+  // wheelhouse, and all of it — the plating you see, the walls you walk into and
+  // the passage between them — comes out of one carve. See bridgeAccess.js.
+  const access = buildBridgeAccess({ materials, slot: u.slot });
+  g.add(access.group);
+  for (const lm of access.lamps ?? []) u.lamp(lm);
+  for (const b of access.solids) {
+    solid.box('bridge', b.c[0], b.c[1], b.c[2], b.h[0], b.h[1], b.h[2]);
+  }
+  // The upper blockhouse, carved round the conning trunk that runs up through it.
+  for (const p of carveBox({
+    min: [-6.5, y0 + 4.0, z0 - 7.5],
+    max: [6.5, y0 + 7.4, z0 + 7.5],
+  }, [connShaft(0.05)])) {
+    const piece = steel(new BoxGeometry(p.h[0] * 2, p.h[1] * 2, p.h[2] * 2));
+    piece.position.set(p.c[0], p.c[1], p.c[2]);
+    g.add(piece);
+    solid.box('bridge', p.c[0], p.c[1], p.c[2], p.h[0], p.h[1], p.h[2]);
+  }
 
   // --- the column ------------------------------------------------------------
   // Slightly conical and tall enough to be seen between every platform.
+  //
+  // Drawn in two pieces, with the wheelhouse's height left out of the middle of it.
+  // A conning tube up through the navigating bridge is what a real pagoda has, and
+  // it made that room a horseshoe two people could not pass in — a three-metre drum
+  // in a nine-metre room. Nothing is lost by leaving it out over those four metres:
+  // the house's own plating is what you see there from outside, so the column was
+  // never visible over that stretch, and the taper is unbroken because both pieces
+  // are cut from the same line.
   const COL_TOP = 30.5; // m above the base blockhouse top
-  const col = dark(new CylinderGeometry(2.1, 3.4, COL_TOP, 16));
-  col.position.set(0, y0 + 7.4 + COL_TOP / 2, z0 - 0.5);
-  g.add(col);
-  solid.cyl('bridge', new Vector3(0, y0 + 7.4, z0 - 0.5), UP, COL_TOP, 3.4);
-  // legs bracing the column down onto the blockhouse, in the open
+  const COL_FOOT = 7.4;
+  const colR = (above) => 3.4 + (2.1 - 3.4) * ((above - COL_FOOT) / COL_TOP);
+  const colSeg = (from, to, { hollow = false } = {}) => {
+    const seg = dark(new CylinderGeometry(colR(to), colR(from), to - from, 16, 1, hollow));
+    seg.position.set(0, y0 + (from + to) / 2, z0 - 0.5);
+    g.add(seg);
+    // A hollow segment is one the ladder to the bridge runs up the inside of, and
+    // it gives up two things for that.
+    //
+    // Its end caps, first: they are horizontal discs six metres across and the
+    // shaft comes up through both of them, so a climber would meet the underside of
+    // the column and then the top of it. Nothing is lost by dropping them — the
+    // foot of this segment stands on the roof of the blockhouse below and its head
+    // is under the air-defence platform, so neither cap has ever been visible from
+    // anywhere.
+    //
+    // And its collider. The trunk's plating is inside this drum for the whole of
+    // its height, so a cylinder here would be a wall standing in the middle of the
+    // shaft — and the drum itself is redundant as collision anyway: over this
+    // stretch it is inside the chart house, that house's gallery and the platform,
+    // every one of which is solid in its own right.
+    if (!hollow) {
+      solid.cyl('bridge', new Vector3(0, y0 + from, z0 - 0.5), UP, to - from, colR(from));
+    }
+  };
+  colSeg(COL_FOOT, WHEEL.y, { hollow: true }); // up to the wheelhouse's deck
+  colSeg(WHEEL.y + WHEEL.ceiling, COL_FOOT + COL_TOP); // and on from its deckhead
+  // Legs bracing the column down onto the blockhouse, in the open.
+  //
+  // They stop under the wheelhouse's deck, and that is the room's doing: they used
+  // to run up to 15.5 m, which is through the middle of the navigating bridge, and
+  // once that level became a room you could stand in they were two bars crossing it
+  // diagonally at head height with nothing holding them up. The taper is unchanged —
+  // the top is simply where the line had got to — so from outside they look exactly
+  // as they did. They stop just under the air-defence platform, which is the
+  // wheelhouse's own deck.
+  const LEG_TOP = WHEEL.y - 0.35;
+  const legR = 5.2 + (2.4 - 5.2) * ((LEG_TOP - 7.4) / (15.5 - 7.4));
   for (let k = 0; k < 4; k++) {
     const a = (k / 4) * Math.PI * 2 + Math.PI / 4;
     g.add(strut(
       new Vector3(Math.cos(a) * 5.2, y0 + 7.4, z0 - 0.5 + Math.sin(a) * 5.2),
-      new Vector3(Math.cos(a) * 2.4, y0 + 15.5, z0 - 0.5 + Math.sin(a) * 2.4),
+      new Vector3(Math.cos(a) * legR, y0 + LEG_TOP, z0 - 0.5 + Math.sin(a) * legR),
       0.28, dark,
     ));
   }
@@ -152,12 +248,19 @@ export function buildBridge({ materials }) {
     return f;
   };
 
-  const railRing = (r, y, dz, stanchions = 16) => {
+  // `openAt` is a bearing round the ring where there is a way onto the platform,
+  // and the bay containing it is left out. A rail drawn across the head of a
+  // ladder is worse than no rail at all: it is the one place on a platform where
+  // somebody is definitely going to walk through it.
+  const railRing = (r, y, dz, stanchions = 16, openAt = null) => {
     const made = [];
     const bays = Math.max(3, Math.min(8, Math.round((2 * Math.PI * r) / BAY)));
     const span = (Math.PI * 2) / bays;
     const perBay = Math.max(2, Math.round(stanchions / bays));
+    const gap = openAt === null ? -1
+      : Math.floor((((openAt % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / span);
     for (let s = 0; s < bays; s++) {
+      if (s === gap) continue;
       const f = fence();
       made.push(f);
       const a0 = s * span;
@@ -216,27 +319,111 @@ export function buildBridge({ materials }) {
   };
 
   // --- a house: enclosed, window band, and an open balcony round it ----------
-  const house = (w, h, l, y, dz, hasWindows = true, balcony = true) => {
-    const b = steel(new BoxGeometry(w, h, l));
-    b.position.set(0, y0 + y + h / 2, z0 + dz);
-    g.add(b);
-    solid.box('bridge', 0, y0 + y + h / 2, z0 + dz, w / 2, h / 2, l / 2);
-    if (hasWindows) {
-      const band = glass(new BoxGeometry(w + 0.1, h * 0.34, l + 0.1));
-      band.position.set(0, y0 + y + h * 0.72, z0 + dz);
-      g.add(band);
+  //
+  // `room` stands a real room in place of the solid box — its own plating, its own
+  // windows, its own lamps — and is used for exactly one level: the wheelhouse.
+  // Everything else up the tower is a box with a painted band on it, which is the
+  // right answer for a level nobody stands in. See wheelhouse.js.
+  //
+  // `shaft` is a void in the ship's frame — the conning trunk — and it turns the
+  // house and its gallery from two boxes into the pieces left over once that void
+  // is taken out of them. A house the trunk passes through has to be carved rather
+  // than merely walked through: a solid box's own top and bottom faces run straight
+  // across the shaft, so a man climbing the ladder inside it would see the underside
+  // of this level appear across the whole opening and then pass through it. See
+  // carve.js, and `connTrunkSolids` in bridgeAccess.js for the plating that closes
+  // the run between the levels.
+  const house = (w, h, l, y, dz, {
+    hasWindows = true, balcony = true, room = null, shaft = null,
+  } = {}) => {
+    let b = null;
+    if (room) {
+      g.add(room.group);
+      for (const s of room.solids) {
+        solid.box('bridge', s.c[0], s.c[1], s.c[2], s.h[0], s.h[1], s.h[2]);
+      }
+      // A room states its own lighting and it is taken as stated.
+      //
+      // This used to overwrite the reach, the colour and the level of every
+      // emitter a room handed up with the window band's — which is the right
+      // answer for a *painted* band on a level nobody stands in, and was quietly
+      // wrong for the one level that is a room: the wheelhouse's deckhead lights
+      // came out as four more window bands, at a window band's brightness, in the
+      // colour of a window band, and no amount of tuning them in wheelhouse.js
+      // changed anything because none of it survived this loop. A room knows what
+      // is burning in it; the tower does not.
+      for (const lm of room.lamps) u.lamp(lm);
+    } else if (shaft) {
+      for (const p of carveBox({
+        min: [-w / 2, y0 + y, z0 + dz - l / 2],
+        max: [w / 2, y0 + y + h, z0 + dz + l / 2],
+      }, [shaft])) {
+        const piece = steel(new BoxGeometry(p.h[0] * 2, p.h[1] * 2, p.h[2] * 2));
+        piece.position.set(p.c[0], p.c[1], p.c[2]);
+        g.add(piece);
+        solid.box('bridge', p.c[0], p.c[1], p.c[2], p.h[0], p.h[1], p.h[2]);
+      }
+    } else {
+      b = steel(new BoxGeometry(w, h, l));
+      b.position.set(0, y0 + y + h / 2, z0 + dz);
+      g.add(b);
+      solid.box('bridge', 0, y0 + y + h / 2, z0 + dz, w / 2, h / 2, l / 2);
+    }
+    if (hasWindows && !room) {
+      // The painted band, in one piece — or in the pieces the trunk leaves of it.
+      // It is a box round the house rather than a skin on it, so its own top and
+      // bottom faces run across anything passing through the house, and a man on
+      // the ladder inside the conning trunk was meeting the underside of the chart
+      // house's window band halfway up the climb.
+      const bandBox = {
+        min: [-(w + 0.1) / 2, y0 + y + h * 0.72 - h * 0.17, z0 + dz - (l + 0.1) / 2],
+        max: [(w + 0.1) / 2, y0 + y + h * 0.72 + h * 0.17, z0 + dz + (l + 0.1) / 2],
+      };
+      for (const p of (shaft ? carveBox(bandBox, [shaft]) : [{
+        c: [0, y0 + y + h * 0.72, z0 + dz],
+        h: [(w + 0.1) / 2, h * 0.17, (l + 0.1) / 2],
+      }])) {
+        const band = glass(new BoxGeometry(p.h[0] * 2, p.h[1] * 2, p.h[2] * 2));
+        band.position.set(p.c[0], p.c[1], p.c[2]);
+        g.add(band);
+      }
+      // One emitter for the whole band, standing a little proud of the glass so
+      // it lights the balcony rail and the gallery under it rather than starting
+      // inside the plating. Reach scales with the house: the wheelhouse is the
+      // brightest thing on the ship and the little houses above it are not.
+      // The emitter is the band itself: a box the size of the house it wraps,
+      // so the light leaves the whole of it rather than the middle of it. Which
+      // is why a wide bridge lays a wide patch on the gallery under it and a
+      // small chart house lays a small one, without either being told to.
+      u.lamp({
+        x: 0, y: y0 + y + h * 0.72, z: z0 + dz,
+        ext: [w / 2, h * 0.17, l / 2],
+        reach: LAMP.window.reach,
+        soft: LAMP.window.soft,
+        color: LAMP.window.color,
+        level: LAMP.window.level * Math.min(1, 0.45 + w / 26),
+      });
     }
     if (balcony) {
       // gallery deck standing proud of the house all the way round, with
       // brackets under it — the brackets are what stop it looking glued on
       const bw = w + 2.6;
       const bl = l + 2.6;
-      const floor = steel(new BoxGeometry(bw, 0.22, bl));
-      floor.position.set(0, y0 + y + h + 0.11, z0 + dz);
-      g.add(floor);
       // The gallery deck is what a falling yardarm lands on, and one day what
-      // somebody walks round, so it is solid as well as drawn.
-      solid.box('bridge', 0, y0 + y + h + 0.11, z0 + dz, bw / 2, 0.11, bl / 2);
+      // somebody walks round, so it is solid as well as drawn — and it takes the
+      // same hole for the trunk that the house under it does.
+      const slabs = shaft
+        ? carveBox({
+          min: [-bw / 2, y0 + y + h, z0 + dz - bl / 2],
+          max: [bw / 2, y0 + y + h + 0.22, z0 + dz + bl / 2],
+        }, [shaft])
+        : [{ c: [0, y0 + y + h + 0.11, z0 + dz], h: [bw / 2, 0.11, bl / 2] }];
+      for (const p of slabs) {
+        const floor = steel(new BoxGeometry(p.h[0] * 2, p.h[1] * 2, p.h[2] * 2));
+        floor.position.set(p.c[0], p.c[1], p.c[2]);
+        g.add(floor);
+        solid.box('bridge', p.c[0], p.c[1], p.c[2], p.h[0], p.h[1], p.h[2]);
+      }
       railRect(bw - 0.3, bl - 0.3, y + h + 0.22, dz);
       for (const sx of [-1, 1]) {
         for (const pz of [-l * 0.35, l * 0.35]) {
@@ -251,14 +438,45 @@ export function buildBridge({ materials }) {
   };
 
   // --- a platform: a thin disc overhanging the column, railed all round ------
-  const platform = (r, y, dz) => {
-    const d = steel(new CylinderGeometry(r, r, 0.3, 24));
-    d.position.set(0, y0 + y, z0 + dz);
-    g.add(d);
-    solid.cyl('bridge', new Vector3(0, y0 + y - 0.15, z0 + dz), UP, 0.3, r);
-    railRing(r - 0.2, y + 0.15, dz, Math.max(10, Math.round(r * 2.6)));
+  //
+  // `brackets` is off for a platform that sits on the roof of the house below it
+  // rather than overhanging air: the brackets reach two metres down to the column,
+  // which is into that house. That is invisible while the house is a solid box and
+  // is two bars across the ceiling once it is a room you can stand in — see the
+  // wheelhouse.
+  const platform = (r, y, dz, { openAt = null, brackets = true, hole = 0 } = {}) => {
+    // A disc, or — where the conning trunk comes up through it — a ring.
+    //
+    // Drawn as a lathe of its own section rather than as a disc with something
+    // subtracted, because the trunk's axis is this platform's axis (see CONN in
+    // wheelhouse.js, which is where that constraint is written down and why) and a
+    // concentric hole in a disc is one profile revolved: inner face, top, outer
+    // face, bottom, back to the start.
+    if (hole > 0) {
+      const yb = y0 + y - 0.15;
+      const yt = y0 + y + 0.15;
+      const d = steel(new LatheGeometry([
+        new Vector2(hole, yb), new Vector2(r, yb), new Vector2(r, yt),
+        new Vector2(hole, yt), new Vector2(hole, yb),
+      ], 24));
+      d.position.set(0, 0, z0 + dz);
+      g.add(d);
+    } else {
+      const d = steel(new CylinderGeometry(r, r, 0.3, 24));
+      d.position.set(0, y0 + y, z0 + dz);
+      g.add(d);
+    }
+    // The collider is the ring the drawing is, bore and all. The wall solver would
+    // not have noticed the difference — it ignores horizontal faces, so a body on a
+    // ladder passes through a 300 mm slab either way — but the *floor* probe would,
+    // and did: a man stepping into the hatch landed on this plate a hand's breadth
+    // down and stood in the opening, grounded, with no way to start down. See
+    // `cylinderHit` in colliders.js.
+    solid.cyl('bridge', new Vector3(0, y0 + y - 0.15, z0 + dz), UP, 0.3, r,
+      hole > 0 ? { bore: hole } : {});
+    railRing(r - 0.2, y + 0.15, dz, Math.max(10, Math.round(r * 2.6)), openAt);
     // brackets under the overhang, back to the column
-    for (let k = 0; k < 6; k++) {
+    for (let k = 0; brackets && k < 6; k++) {
       const a = (k / 6) * Math.PI * 2 + 0.3;
       g.add(strut(
         new Vector3(Math.cos(a) * 2.0, y0 + y - 2.2, z0 + dz + Math.sin(a) * 2.0),
@@ -269,10 +487,23 @@ export function buildBridge({ materials }) {
   };
 
   // Irregular on purpose: house, big platform, house, platform, neck, top house.
-  house(12.5, 3.6, 12.0, 7.4, 1.6); // lower bridge / chart house
-  platform(7.4, 11.6, 1.2); // wide air-defence platform, overhangs everything
-  house(9.0, 3.4, 8.5, 12.6, 1.4); // navigating bridge
-  platform(6.0, 16.5, 1.0);
+  //
+  // The second house is the wheelhouse and is a room; the platform under it is
+  // where the ladder trunk lets you out, so its rail has a gap at the head of the
+  // gangway. Everything else is as it was.
+  const wheelhouse = buildWheelhouse({ materials, slot: u.slot });
+  house(12.5, 3.6, 12.0, 7.4, 1.6, { shaft: connShaft(0.05) }); // lower bridge / chart house
+  // The air-defence platform, with the hole the conning trunk comes up through.
+  // The ring is a little wider than the trunk so the plating passes cleanly and
+  // there is no seam to fight for the same pixels.
+  platform(7.4, 11.6, 1.2, {
+    openAt: gangwayBearing(7.4 - 0.2),
+    hole: CONN.half * Math.SQRT2 + 0.05,
+  });
+  // the navigating bridge: the wheelhouse, and its own module owns its dimensions
+  // because the room inside it has to agree with them to the centimetre
+  house(WHEEL.w, WHEEL.h, WHEEL.l, WHEEL.y, WHEEL.dz, { room: wheelhouse });
+  platform(6.0, 16.5, 1.0, { brackets: false }); // stands on the wheelhouse's gallery
   house(7.2, 3.2, 7.0, 17.3, 1.0); // upper bridge
   platform(5.0, 21.0, 0.6); // searchlight platform
   // a gap here — bare column — which is what stops it reading as a stack
@@ -438,6 +669,12 @@ export function buildBridge({ materials }) {
     ...detachable,
   ];
   u.solids = solid.list;
+  // The two things about the pagoda that anything outside it needs a handle on:
+  // the room she is conned from (its gear has to be turned by whatever the helm is
+  // doing) and the ladder up to it (which is a mode the character controller has to
+  // be told about, not a shape it can collide with).
+  u.wheelhouse = wheelhouse;
+  u.ladders = access.ladders;
   return u;
 }
 
@@ -640,8 +877,24 @@ export function buildDeckhouses({ materials }) {
   }
   // A run down one side, `z0` the foremost of it. Runs are kept well short of
   // the corners of the plate, because a scuttle in the corner reads as a mistake.
+  //
+  // Each run also gets one lamp, at the middle of it and half a metre out from
+  // the plating. One for seven windows is the right count, not a compromise:
+  // what a row of cabin lights throws on the side deck outside them is a single
+  // soft stretch, and seven emitters a metre and a half apart would cost seven
+  // times as much to produce the same one.
   function scuttleRun(side, x, y, z0, count) {
     for (let k = 0; k < count; k++) scuttle(x, y, z0 - k * SPACING, side);
+    const runHalf = ((count - 1) / 2) * SPACING;
+    u.lamp({
+      x: x + side * 0.5, y, z: z0 - runHalf,
+      // a line light down the run, which is what a row of portholes is
+      ext: [0, 0, runHalf],
+      reach: LAMP.scuttle.reach,
+      soft: LAMP.scuttle.soft,
+      color: LAMP.scuttle.color,
+      level: LAMP.scuttle.level,
+    });
   }
 
   const A = SUPER.aftSuper;
@@ -703,15 +956,55 @@ export function buildDeckhouses({ materials }) {
     d.add(wheel);
     g.add(d);
   }
+  // A door and the light over it, which on a ship at night are one fitting: the
+  // door is a rectangle of the same grey as the wall it is cut in, and without
+  // the lamp you can stand a metre from the way into the superstructure and not
+  // know it is there. Same holder as the ones over the turret doors — see
+  // bulkheadLight.js — and the same tungsten yellow.
+  //
+  // A door's group maps its local +x to (cos, 0, -sin), so that vector is the
+  // way the door faces, and it is what the lamp is stood off along. The fitting
+  // is built facing +x and turned the same way, which is why it takes `side` of
+  // 1 always: `yaw` does the facing, not the mirror.
+  function litDoor(x, y, z, yaw) {
+    watertightDoor(x, y, z, yaw);
+    const nx = Math.cos(yaw);
+    const nz = -Math.sin(yaw);
+    const ly = y + DOOR.h + 0.42;
+    const lit = [];
+    for (const part of doorLight(u.slot, 1)) {
+      part.rotateY(yaw);
+      part.translate(x, ly, z);
+      lit.push(part);
+    }
+    g.add(new Mesh(merge(lit), u.materials.body));
+    u.lamp({
+      x: x + nx * 0.24, y: ly, z: z + nz * 0.24,
+      ext: [0.05, 0.05, 0.05],
+      reach: DOOR_LAMP.reach,
+      soft: DOOR_LAMP.soft,
+      color: DOOR_LAMP.color,
+      level: DOOR_LAMP.level,
+    });
+  }
+
   for (const side of [-1, 1]) {
     const face = side > 0 ? FACE.port : FACE.starboard;
     // shelter deck, at the head of the forward brow
-    watertightDoor(side * (D.w / 2), deckY(D.z) + DOOR.sill, zOf(D.z) + 10, face);
-    // aft deckhouse, at the head of the after brow
-    watertightDoor(side * (A.w / 2), deckY(A.z) + DOOR.sill, zOf(A.z) + 5, face);
+    litDoor(side * (D.w / 2), deckY(D.z) + DOOR.sill, zOf(D.z) + 10, face);
+    // At the head of the after brow — and in the *shelter deck's* side, not the
+    // after deckhouse's, which is where it used to be and where it could not be.
+    //
+    // The two boxes overlap: the shelter deck is 20 m across and 30 long and its
+    // after end reaches past this station, so a door hung on the after
+    // deckhouse's side here at 6.5 m out was six metres inside another solid.
+    // What you met walking up to it was the shelter deck's own side at 10 m —
+    // which is why it read as an invisible wall in front of a lit door, and why
+    // nobody noticed until the door had a light over it.
+    litDoor(side * (D.w / 2), deckY(D.z) + DOOR.sill, zOf(A.z) + 5, face);
   }
   // and one out onto the quarterdeck, in the after bulkhead
-  watertightDoor(0, deckY(A.z) + DOOR.sill, zOf(A.z) - A.l / 2, FACE.aft);
+  litDoor(0, deckY(A.z) + DOOR.sill, zOf(A.z) - A.l / 2, FACE.aft);
 
   // secondary director on the aft deckhouse
   const dir = dark(new CylinderGeometry(1.4, 1.6, 2.4, 14));
